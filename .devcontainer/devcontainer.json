@@ -1,0 +1,97 @@
+// VS Code Dev Container for developing this package on its own. In production the package is
+// vcs-imported into SyncAI-Robot-Workspace, which has its own image; nothing here is used there.
+//
+// The container builds a colcon workspace around the repo: /workspace is a named volume (build/
+// install/ log/), and the repo is bind-mounted at /workspace/src/syncai_mapping, the same
+// path it would have in SyncAI-Robot-Workspace.
+//
+// The image and the volume names are this repo's own, so this container can run side by side with
+// the SyncAI-Robot-State / Driver-Manager ones (same ROS_DOMAIN_ID, so the nodes see each other).
+{
+  "name": "SyncAI Robot 3D Mapping (ROS 2 C++ + PCL + GTSAM)",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "args": {
+      "ROS_DISTRO": "humble",
+      // Always the ros user with uid/gid 1000, regardless of the host user
+      "USER_UID": "1000",
+      "USER_GID": "1000",
+      // Also install Claude Code inside the Dev Container
+      "INSTALL_CLAUDE_CODE": "true"
+    }
+  },
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace/src/syncai_mapping,type=bind,consistency=cached",
+  "workspaceFolder": "/workspace/src/syncai_mapping",
+  "mounts": [
+    "source=syncai-robot-3d-mapping_workspace,target=/workspace,type=volume",
+    // Claude Code settings and login, so rebuilding the container does not require logging in again
+    "source=syncai-robot-3d-mapping_claude-config,target=/home/ros/.claude,type=volume"
+  ],
+  "runArgs": [
+    // Fixed name so `docker exec syncai-robot-3d-mapping ...` works from the host
+    "--name=syncai-robot-3d-mapping",
+    // tini as PID 1 so zombie processes left behind after Ctrl-C get reaped
+    "--init",
+    // Host network: DDS goes over the physical NIC / lo, not the docker bridge, so this container
+    // shares a ROS graph with the other SyncAI dev containers and with the robot
+    "--network=host"
+  ],
+  "containerEnv": {
+    // 2 matches the other SyncAI dev containers, so they see each other's topics.
+    // Change this to isolate from other ROS graphs on the same machine (the real robot is domain 1).
+    "ROS_DOMAIN_ID": "2",
+    "RMW_IMPLEMENTATION": "rmw_cyclonedds_cpp"
+  },
+  // Pull syncai_common and small_gicp next to this package (skipped if already there), then build
+  // once with compile_commands.json so IntelliSense resolves ROS, PCL and GTSAM headers
+  "postCreateCommand": "cd /workspace && vcs import --skip-existing < src/syncai_mapping/dependencies.repos && colcon build --symlink-install --cmake-args -DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+
+  // Both the container and the VS Code server run as ros (uid/gid 1000), not root
+  "containerUser": "ros",
+  "remoteUser": "ros",
+  // Do not remap the uid to the host user; keep it at 1000
+  "updateRemoteUserUID": false,
+
+  // Use a login shell for the environment so the C++ tooling sees the sourced ROS 2 env
+  "userEnvProbe": "loginInteractiveShell",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cpptools",
+        "ms-vscode.cmake-tools",
+        "twxs.cmake",
+        "xaver.clang-format",
+        "redhat.vscode-xml",
+        "ms-python.python",
+        "ranch-hand-robotics.rde-ros-2",
+        "anthropic.claude-code"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash",
+        // IntelliSense from the compile database colcon writes (see postCreateCommand)
+        "C_Cpp.default.compileCommands": "/workspace/build/syncai_mapping/compile_commands.json",
+        "C_Cpp.default.cppStandard": "c++17",
+        "cmake.configureOnOpen": false,
+
+        // Format on save: C++ goes through clang-format, which reads .clang-format at the repo root
+        "files.autoSave": "onFocusChange",
+        "[cpp]": {
+          "editor.defaultFormatter": "xaver.clang-format",
+          "editor.formatOnSave": true
+        },
+        "[xml]": {
+          "editor.defaultFormatter": "redhat.vscode-xml",
+          "editor.formatOnSave": true
+        },
+        "files.insertFinalNewline": true,
+        "files.trimTrailingWhitespace": true,
+        "files.watcherExclude": {
+          "**/build/**": true,
+          "**/install/**": true,
+          "**/log/**": true
+        }
+      }
+    }
+  }
+}

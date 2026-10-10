@@ -1,0 +1,12 @@
+# colcon build output, if anyone builds this package in place rather than from the workspace it is
+# vcs-imported into (the dev container keeps them in the `workspace` volume)
+build/
+install/
+log/
+compile_commands.json
+
+# Editors / OS
+.DS_Store
+.vscode/
+.cache/
+*.swp
