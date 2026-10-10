@@ -1,0 +1,24 @@
+# Source dependencies of syncai_mapping that are colcon packages rather than apt / image installs,
+# pinned to what SyncAI-Robot-Workspace uses (its interface.repos and third-party.repos):
+#
+# - syncai_common (SyncAI-Robot-Interface): SaveMaps / StartMapping / ResetMapping / RefineMap /
+#   SavePoses / ResetLIO and the other shared msg / srv.
+# - small_gicp: pgo_node's loop verification backend, a build_type cmake package.
+#
+# The Dev Container imports it on creation (postCreateCommand) and CI imports it in ci.sh. By hand,
+# inside the container, from the workspace root (the keys already include `src/`):
+#
+#   cd /workspace && vcs import --skip-existing < src/syncai_mapping/dependencies.repos
+#   cd /workspace && vcs import --force < src/syncai_mapping/dependencies.repos  # after a pin change
+#
+# These land next to this package in the workspace, never inside this repo. Never add --shallow if
+# a pin becomes a commit SHA. Keep the pins in step with SyncAI-Robot-Workspace.
+repositories:
+  src/syncai_common:
+    type: git
+    url: https://github.com/chungweeeei/SyncAI-Robot-Interface.git
+    version: dev
+  src/third-party/small_gicp:
+    type: git
+    url: https://github.com/koide3/small_gicp.git
+    version: v1.0.1

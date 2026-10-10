@@ -2,13 +2,13 @@
 // vcs-imported into SyncAI-Robot-Workspace, which has its own image; nothing here is used there.
 //
 // The container builds a colcon workspace around the repo: /workspace is a named volume (build/
-// install/ log/), and the repo is bind-mounted at /workspace/src/syncai_robot_3d_mapping, the same
+// install/ log/), and the repo is bind-mounted at /workspace/src/syncai_mapping, the same
 // path it would have in SyncAI-Robot-Workspace.
 //
 // The image and the volume names are this repo's own, so this container can run side by side with
 // the SyncAI-Robot-State / Driver-Manager ones (same ROS_DOMAIN_ID, so the nodes see each other).
 {
-  "name": "SyncAI Robot 3D Mapping (ROS 2 + Rust)",
+  "name": "SyncAI Robot 3D Mapping (ROS 2 C++ + PCL + GTSAM)",
   "build": {
     "dockerfile": "Dockerfile",
     "args": {
@@ -20,12 +20,10 @@
       "INSTALL_CLAUDE_CODE": "true"
     }
   },
-  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace/src/syncai_robot_3d_mapping,type=bind,consistency=cached",
-  "workspaceFolder": "/workspace/src/syncai_robot_3d_mapping",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace/src/syncai_mapping,type=bind,consistency=cached",
+  "workspaceFolder": "/workspace/src/syncai_mapping",
   "mounts": [
     "source=syncai-robot-3d-mapping_workspace,target=/workspace,type=volume",
-    "source=syncai-robot-3d-mapping_cargo-registry,target=/home/ros/.cargo/registry,type=volume",
-    "source=syncai-robot-3d-mapping_cargo-git,target=/home/ros/.cargo/git,type=volume",
     // Claude Code settings and login, so rebuilding the container does not require logging in again
     "source=syncai-robot-3d-mapping_claude-config,target=/home/ros/.claude,type=volume"
   ],
@@ -44,9 +42,9 @@
     "ROS_DOMAIN_ID": "2",
     "RMW_IMPLEMENTATION": "rmw_cyclonedds_cpp"
   },
-  // Build once so rust-analyzer finds the generated message crates and the colcon-ros-cargo
-  // /workspace/.cargo/config.toml exists
-  "postCreateCommand": "cd /workspace && colcon build --symlink-install",
+  // Pull syncai_common and small_gicp next to this package (skipped if already there), then build
+  // once with compile_commands.json so IntelliSense resolves ROS, PCL and GTSAM headers
+  "postCreateCommand": "cd /workspace && vcs import --skip-existing < src/syncai_mapping/dependencies.repos && colcon build --symlink-install --cmake-args -DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
 
   // Both the container and the VS Code server run as ros (uid/gid 1000), not root
   "containerUser": "ros",
@@ -54,35 +52,32 @@
   // Do not remap the uid to the host user; keep it at 1000
   "updateRemoteUserUID": false,
 
-  // Use a login shell for the environment so rust-analyzer and friends see the sourced ROS 2 env
+  // Use a login shell for the environment so the C++ tooling sees the sourced ROS 2 env
   "userEnvProbe": "loginInteractiveShell",
 
   "customizations": {
     "vscode": {
       "extensions": [
-        "rust-lang.rust-analyzer",
-        "vadimcn.vscode-lldb",
-        "tamasfe.even-better-toml",
+        "ms-vscode.cpptools",
+        "ms-vscode.cmake-tools",
+        "twxs.cmake",
+        "xaver.clang-format",
         "redhat.vscode-xml",
         "ms-python.python",
-        "ms-vscode.cpptools",
         "ranch-hand-robotics.rde-ros-2",
         "anthropic.claude-code"
       ],
       "settings": {
         "terminal.integrated.defaultProfile.linux": "bash",
-        // Keep target/ in the workspace volume to avoid compiling on a macOS bind mount
-        "rust-analyzer.cargo.targetDir": "/workspace/build/.rust-analyzer",
-        "rust-analyzer.check.command": "clippy",
+        // IntelliSense from the compile database colcon writes (see postCreateCommand)
+        "C_Cpp.default.compileCommands": "/workspace/build/syncai_mapping/compile_commands.json",
+        "C_Cpp.default.cppStandard": "c++17",
+        "cmake.configureOnOpen": false,
 
-        // Format on save: Rust goes through rust-analyzer (which reads rustfmt.toml next to Cargo.toml)
+        // Format on save: C++ goes through clang-format, which reads .clang-format at the repo root
         "files.autoSave": "onFocusChange",
-        "[rust]": {
-          "editor.defaultFormatter": "rust-lang.rust-analyzer",
-          "editor.formatOnSave": true
-        },
-        "[toml]": {
-          "editor.defaultFormatter": "tamasfe.even-better-toml",
+        "[cpp]": {
+          "editor.defaultFormatter": "xaver.clang-format",
           "editor.formatOnSave": true
         },
         "[xml]": {
@@ -94,8 +89,7 @@
         "files.watcherExclude": {
           "**/build/**": true,
           "**/install/**": true,
-          "**/log/**": true,
-          "**/target/**": true
+          "**/log/**": true
         }
       }
     }

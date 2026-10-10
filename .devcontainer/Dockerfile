@@ -3,36 +3,72 @@ FROM ros:humble-ros-base
 ARG ROS_DISTRO
 ENV DEBIAN_FRONTEND=noninteractive
 
-# rmw-cyclonedds-cpp: the RMW devcontainer.json selects via RMW_IMPLEMENTATION; without it rcl
-# refuses to start (including cargo test binaries)
+# - libboost-all-dev / libtbb-dev / libeigen3-dev: GTSAM / Sophus builds and headers (same set as
+#   the SyncAI-Robot-Workspace image, so they are built against the same libraries)
+# - ros-*-pcl-conversions / pcl-ros: PCL (libpcl-dev) plus the PointCloud2 <-> pcl bridge
+# - rmw-cyclonedds-cpp: the RMW devcontainer.json selects via RMW_IMPLEMENTATION; without it rcl
+#   refuses to start
+# - clang-format: the version CI's format job also pins (Ubuntu 22.04's clang-format 14)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
-        clang \
+        clang-format \
         cmake \
         curl \
+        gdb \
         git \
-        libclang-dev \
+        libboost-all-dev \
+        libeigen3-dev \
+        libtbb-dev \
         python3-pip \
         python3-vcstool \
         sudo \
         tmux \
         vim \
-        ros-${ROS_DISTRO}-example-interfaces \
-        ros-${ROS_DISTRO}-test-msgs \
+        ros-${ROS_DISTRO}-pcl-conversions \
+        ros-${ROS_DISTRO}-pcl-ros \
         ros-${ROS_DISTRO}-rmw-cyclonedds-cpp \
     && rm -rf /var/lib/apt/lists/*
 
+# GTSAM 4.2.0, built from source into /usr/local exactly as SyncAI-Robot-Workspace's deps-builder
+# stage does (there is no apt/PPA GTSAM on arm64). Flags follow the LIO-SAM recipe: system Eigen
+# and no march-native to avoid Eigen-alignment crashes when mixed with PCL; TBB on; shared libs.
+# Kept above everything that changes often: this layer takes a long time to build.
+ARG GTSAM_VERSION=4.2.0
+RUN git clone --branch ${GTSAM_VERSION} --depth 1 https://github.com/borglab/gtsam.git /tmp/gtsam \
+    && cd /tmp/gtsam && mkdir build && cd build \
+    && cmake .. \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DGTSAM_USE_SYSTEM_EIGEN=ON \
+        -DGTSAM_BUILD_WITH_MARCH_NATIVE=OFF \
+        -DGTSAM_BUILD_TESTS=OFF \
+        -DGTSAM_BUILD_UNSTABLE=OFF \
+        -DGTSAM_BUILD_EXAMPLES_ALWAYS=OFF \
+        -DGTSAM_WITH_TBB=ON \
+        -DBUILD_SHARED_LIBS=ON \
+    && make -j"$(nproc)" && make install \
+    && ldconfig \
+    && rm -rf /tmp/gtsam
 
-RUN if [ "${ROS_DISTRO}" = "humble" ]; then \
-        pip install --no-cache-dir --upgrade pytest \
-        && pip install --no-cache-dir \
-            git+https://github.com/colcon/colcon-cargo.git \
-            git+https://github.com/colcon/colcon-ros-cargo.git; \
-    else \
-        pip install --break-system-packages --no-cache-dir pytest \
-            git+https://github.com/colcon/colcon-ros-cargo.git \
-            git+https://github.com/colcon/colcon-cargo.git; \
-    fi
+# Sophus 1.22.10 (hba_node): header-only, source-built like SyncAI-Robot-Workspace's image.
+# SOPHUS_USE_BASIC_LOGGING=ON drops the fmt dependency (matches the compile definition hba_node
+# sets in CMakeLists.txt).
+ARG SOPHUS_VERSION=1.22.10
+RUN git clone --branch ${SOPHUS_VERSION} --depth 1 https://github.com/strasdat/Sophus.git \
+        /tmp/Sophus \
+    && cd /tmp/Sophus && mkdir build && cd build \
+    && cmake .. \
+        -DSOPHUS_USE_BASIC_LOGGING=ON \
+        -DBUILD_SOPHUS_TESTS=OFF \
+        -DBUILD_SOPHUS_EXAMPLES=OFF \
+    && make -j"$(nproc)" && make install \
+    && ldconfig \
+    && rm -rf /tmp/Sophus
+
+# OctoMap for build_octomap (the rosdep key `octomap`). Its own layer below GTSAM so adding apt
+# packages here never invalidates the slow GTSAM build above.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ros-${ROS_DISTRO}-octomap \
+    && rm -rf /var/lib/apt/lists/*
 
 ARG USERNAME=ros
 ARG USER_UID=1000
@@ -42,53 +78,22 @@ RUN groupadd --gid ${USER_GID} ${USERNAME} \
     && echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${USERNAME} \
     && chmod 0440 /etc/sudoers.d/${USERNAME}
 
-ENV ROS2_RUST_UNDERLAY=/opt/ros2_rust_underlay
-# The repo is bind-mounted at /workspace/src/syncai_robot_3d_mapping on top of a named volume at
+# The repo is bind-mounted at /workspace/src/syncai_mapping on top of a named volume at
 # /workspace. Create the mount point here so the volume is seeded with ros-owned directories;
 # otherwise Docker creates src/ as root and nothing (e.g. a vcs-imported package) can be added
 # next to this one.
-RUN mkdir -p /workspace/src/syncai_robot_3d_mapping /workspace/build /workspace/install /workspace/log \
-             /home/${USERNAME}/.cargo/registry /home/${USERNAME}/.cargo/git \
-             ${ROS2_RUST_UNDERLAY} \
-    && chown -R ${USER_UID}:${USER_GID} /workspace /home/${USERNAME} ${ROS2_RUST_UNDERLAY}
+RUN mkdir -p /workspace/src/syncai_mapping /workspace/build /workspace/install \
+             /workspace/log \
+    && chown -R ${USER_UID}:${USER_GID} /workspace /home/${USERNAME}
+
+COPY setup_env.sh /opt/ros_setup.sh
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh \
+    && printf '. /opt/ros_setup.sh\n' > /etc/profile.d/10-ros.sh \
+    && printf '. /opt/ros_setup.sh\n' >> /home/${USERNAME}/.bashrc
 
 USER ${USERNAME}
 ENV HOME=/home/${USERNAME}
-
-ARG RUST_VERSION=1.85.0
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-      | sh -s -- --default-toolchain ${RUST_VERSION} -y --no-modify-path --component rustfmt --component clippy
-ENV PATH=${HOME}/.cargo/bin:${PATH}
-# rclrs declares rust-version 1.85 but its dependencies keep moving: on a fresh resolve cargo picks
-# the newest `uuid`, which already needs rustc 1.89, and the underlay build fails with "rustc
-# 1.85.0 is not supported". With the fallback policy cargo prefers the newest dependency version
-# whose own rust-version still fits the toolchain, so the pin above stays honest without a
-# committed lock file for the underlay. (Cargo 1.84+; this is the `[resolver]
-# incompatible-rust-versions` config key as an environment variable.)
-ENV CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback
-
-
-RUN mkdir -p ${ROS2_RUST_UNDERLAY}/src \
-    && cd ${ROS2_RUST_UNDERLAY} \
-    && curl -fsSL -o ros2_rust.repos \
-        https://raw.githubusercontent.com/ros2-rust/ros2_rust/main/ros2_rust_${ROS_DISTRO}.repos \
-    && vcs import src < ros2_rust.repos \
-    && rm -rf src/ros2-rust/examples \
-    && git clone --depth 1 https://github.com/ros2-rust/ros2_rust.git src/ros2-rust/ros2_rust
-
-RUN . /opt/ros/${ROS_DISTRO}/setup.sh \
-    && cd ${ROS2_RUST_UNDERLAY} \
-    && colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release \
-    && rm -rf ${ROS2_RUST_UNDERLAY}/build ${ROS2_RUST_UNDERLAY}/log
-
-USER root
-COPY setup_env.sh /opt/ros2_rust_setup.sh
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh \
-    && printf '. /opt/ros2_rust_setup.sh\n' > /etc/profile.d/10-ros2-rust.sh \
-    && printf '. /opt/ros2_rust_setup.sh\n' >> /home/${USERNAME}/.bashrc
-
-USER ${USERNAME}
 
 ARG INSTALL_CLAUDE_CODE=false
 ENV CLAUDE_CONFIG_DIR=${HOME}/.claude
