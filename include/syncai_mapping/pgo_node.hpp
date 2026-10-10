@@ -2,7 +2,7 @@
 #define SYNCAI_MAPPING__PGO_NODE_HPP_
 
 // The ROS shell around the pose graph. The graph itself (keyframe selection,
-// radius-search loop detection with ICP verification, GTSAM iSAM2 smoothing)
+// radius-search loop detection with GICP verification, GTSAM iSAM2 smoothing)
 // is pgos/pose_graph_optimizer.*; this class owns the synchronised cloud+odom intake,
 // the 50 ms timer that feeds it and broadcasts map -> local_frame, the
 // "map so far" merge worker and its file hand-off to the operator console's
@@ -34,7 +34,7 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
-#include <queue>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -51,7 +51,7 @@
 #include "syncai_common/srv/reset_mapping.hpp"
 #include "syncai_common/srv/save_maps.hpp"
 #include "syncai_common/srv/start_mapping.hpp"
-#include "syncai_mapping/map_cleaner.hpp"
+#include "syncai_mapping/dynamic_removal/remover.hpp"
 #include "syncai_mapping/pgos/commons.h"
 #include "syncai_mapping/pgos/pose_graph_optimizer.h"
 #include "visualization_msgs/msg/marker.hpp"
@@ -62,14 +62,15 @@ namespace syncai_mapping
 
 struct NodeConfig
 {
-  // The two inputs and the LIO reset service live in syncai_pointlio's
-  // namespace, which a relative name from inside /<robot_id>/pgo cannot
-  // reach, so all three are absolute and the launch overrides them per
-  // robot_id. These are the bare-run fallbacks and must never carry one.
-  std::string cloud_topic = "/pointlio/body_cloud";
-  std::string odom_topic = "/pointlio/lio_odom";
+  // The two inputs, the frames and the LIO reset service. Fixed names, NOT
+  // parameters: loadParameters() derives them from this node's namespace
+  // (syncai_pointlio runs at /<robot_id>/pointlio, the sibling of
+  // /<robot_id>/pgo), so they always match pointlio.launch.py without the
+  // launch having to pass them.
+  std::string cloud_topic;
+  std::string odom_topic;
   std::string map_frame = "map";
-  std::string local_frame = "lidar";
+  std::string local_frame;
   // The published "map so far" merge (see publishMapCloud). Node-level publish
   // behaviour, not PGO math, so they live here rather than in PoseGraphOptimizerConfig.
   double map_cloud_resolution = 0.2;
@@ -80,12 +81,8 @@ struct NodeConfig
   // small for two merges of a large site). mapping.launch.py appends
   // /<robot_id> so two robots on one host never share a directory.
   std::string map_cloud_dir = "/dev/shm/syncai_pgo";
-  // pointlio's reset service. Absolute, and overridden per robot_id by
-  // mapping.launch.py for exactly the reason cloud_topic and odom_topic are:
-  // it names something in pointlio's namespace, which a relative name from
-  // inside /<robot_id>/pgo cannot reach. Keeping it a parameter is what stops
-  // this file from ever spelling a robot_id.
-  std::string lio_reset_service = "/pointlio/reset";
+  // pointlio's reset service, derived like cloud_topic / odom_topic above.
+  std::string lio_reset_service;
   // Come up MAPPING instead of IDLE (2026-10, when the idle state arrived).
   // The escape hatch for bag replays and for a backend without a Start
   // control: with it false -- the default, and what the mapping session
@@ -93,17 +90,32 @@ struct NodeConfig
   bool start_on_launch = false;
   // The post-save map cleaning (see startMapClean): whether a successful
   // save_maps with save_patches spawns clean_map, the nice value it runs at,
-  // and the parameters it is handed on its command line. map_cleaner::Params
+  // and the parameters it is handed on its command line. dynamic_removal::Params
   // carries the defaults and the why of each.
   bool map_clean_enabled = true;
   int map_clean_nice = 10;
-  map_cleaner::Params map_clean;
+  dynamic_removal::Params map_clean;
+};
+
+// One synchronised cloud+odom pair, as syncCB hands it to timerCB: the pose
+// already decoded (cheap), the cloud still the ROS message. pcl::fromROSMsg is
+// a full copy of a lidar frame, so timerCB does it only for a pair that turns
+// out to be a keyframe.
+struct PendingPair
+{
+  PoseWithTime pose;
+  sensor_msgs::msg::PointCloud2::ConstSharedPtr cloud_msg;
 };
 
 struct NodeState
 {
   std::mutex message_mutex;
-  std::queue<CloudWithPose> cloud_buffer;
+  // The newest pair syncCB accepted that timerCB has not taken yet. One slot,
+  // not a queue: syncCB overwrites it, timerCB moves it out, both O(1) under
+  // message_mutex. A queue here used to grow while timerCB was busy (a slow
+  // optimisation, a save holding m_pgo_mutex) only for timerCB to keep the
+  // OLDEST entry and pop the rest -- every one of them a decoded lidar frame.
+  std::optional<PendingPair> latest_pair;
   // Was uninitialised, so the out-of-order guard in syncCB compared the very
   // first message against whatever was on the stack. -1.0 is the "no message
   // seen yet" value, and is also what resetMappingCB puts back.
@@ -149,7 +161,6 @@ public:
   static bool isMapCloudFile(const std::filesystem::directory_entry & entry);
   void clearMapCloudDir();
   void pruneMapCloudFiles();
-  static std::string jsonEscape(const std::string & s);
   std::string mapCloudNoticeJson(
     uint64_t seq, const std::string & path, size_t points,
     const builtin_interfaces::msg::Time & time) const;

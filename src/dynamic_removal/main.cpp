@@ -1,8 +1,8 @@
 // clean_map: the post-save map cleaning for one pgo save directory.
 //
-//   clean_map <map_dir> [--resolution 0.1] [--max-range 20] [--min-range 0.5]
-//       [--lidar-height 0.481] [--floor-band 0.25] [--max-height 2.0]
-//       [--floor-radius 10] [--min-hits 2] [--dynamic-miss-ratio 2.0]
+//   clean_map <map_dir> [--voxel-size 0.1] [--max-range 20] [--min-range 0.5]
+//       [--lidar-height 0.481] [--floor-band 0.25] [--dynamic-max-height 2.0]
+//       [--floor-radius 10] [--sparse-min-hits 2] [--dynamic-miss-ratio 2.0]
 //       [--dynamic-min-miss 3] [--clip-below-floor 1] [--nice 0]
 //       [--lock <path>|none] [--started-at <ISO-8601>]
 //
@@ -33,15 +33,15 @@
 #include <iostream>
 #include <string>
 
-#include "syncai_mapping/map_clean_recipe.hpp"
-#include "syncai_mapping/map_cleaner.hpp"
+#include "syncai_mapping/dynamic_removal/recipe.hpp"
+#include "syncai_mapping/dynamic_removal/remover.hpp"
 
 namespace
 {
 
 namespace fs = std::filesystem;
-namespace mc = syncai_mapping::map_cleaner;
-namespace recipe = syncai_mapping::map_clean_recipe;
+namespace dr = syncai_mapping::dynamic_removal;
+namespace recipe = syncai_mapping::dynamic_removal::recipe;
 
 volatile std::sig_atomic_t g_stop_signal = 0;
 
@@ -52,11 +52,11 @@ void onStopSignal(int sig)
 
 void usage()
 {
-  std::cerr << "usage: clean_map <map_dir> [--resolution 0.1] [--max-range 20] "
+  std::cerr << "usage: clean_map <map_dir> [--voxel-size 0.1] [--max-range 20] "
                "[--min-range 0.5]\n"
-               "         [--lidar-height 0.481] [--floor-band 0.25] [--max-height 2.0] "
+               "         [--lidar-height 0.481] [--floor-band 0.25] [--dynamic-max-height 2.0] "
                "[--floor-radius 10]\n"
-               "         [--min-hits 2] [--dynamic-miss-ratio 2.0] [--dynamic-min-miss 3]\n"
+               "         [--sparse-min-hits 2] [--dynamic-miss-ratio 2.0] [--dynamic-min-miss 3]\n"
                "         [--clip-below-floor 1]\n"
                "         [--nice 0] [--lock /dev/shm/syncai_pgo/clean_map.lock|none] "
                "[--started-at <ISO-8601 UTC>]\n";
@@ -121,7 +121,7 @@ int main(int argc, char ** argv)
 {
   std::string dir_arg, lock_path = "/dev/shm/syncai_pgo/clean_map.lock", started_at;
   int nice_value = 0;
-  mc::Params params;
+  dr::Params params;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "-h" || a == "--help") {
@@ -143,8 +143,8 @@ int main(int argc, char ** argv)
     const std::string v = argv[++i];
     double d = 0.0;
     bool good = true;
-    if (a == "--resolution") {
-      good = parseDouble(v, params.resolution) && params.resolution > 0.0;
+    if (a == "--voxel-size") {
+      good = parseDouble(v, params.voxel_size) && params.voxel_size > 0.0;
     } else if (a == "--max-range") {
       good = parseDouble(v, params.max_range);
     } else if (a == "--min-range") {
@@ -153,13 +153,13 @@ int main(int argc, char ** argv)
       good = parseDouble(v, params.lidar_height);
     } else if (a == "--floor-band") {
       good = parseDouble(v, params.floor_band);
-    } else if (a == "--max-height") {
-      good = parseDouble(v, params.max_height);
+    } else if (a == "--dynamic-max-height") {
+      good = parseDouble(v, params.dynamic_max_height);
     } else if (a == "--floor-radius") {
       good = parseDouble(v, params.floor_radius);
-    } else if (a == "--min-hits") {
+    } else if (a == "--sparse-min-hits") {
       good = parseDouble(v, d) && d == static_cast<int>(d);
-      params.min_hits = static_cast<int>(d);
+      params.sparse_min_hits = static_cast<int>(d);
     } else if (a == "--dynamic-miss-ratio") {
       good = parseDouble(v, params.dynamic_miss_ratio) && params.dynamic_miss_ratio > 0.0;
     } else if (a == "--dynamic-min-miss") {
@@ -241,12 +241,12 @@ int main(int argc, char ** argv)
     std::cerr << "[clean_map] " << e.what() << "\n";
   }
 
-  std::cout << "[clean_map] cleaning " << dir.string() << " at " << params.resolution
+  std::cout << "[clean_map] cleaning " << dir.string() << " at " << params.voxel_size
             << " m (max range " << params.max_range << " m)" << std::endl;
-  mc::Measurements m;
+  dr::Measurements m;
   int rc = 0;
   try {
-    const bool done = mc::clean(dir, params, m, [](const char * stage, size_t done, size_t total) {
+    const bool done = dr::clean(dir, params, m, [](const char * stage, size_t done, size_t total) {
       if (done % 100 == 0) {
         std::cout << "[clean_map] " << stage << " " << done << "/" << total << " keyframes"
                   << std::endl;
@@ -271,7 +271,7 @@ int main(int argc, char ** argv)
                 << " map_points_kept=" << m.map_points_kept << " clipped_rays=" << m.clipped_rays
                 << " in " << m.elapsed_s << " s" << std::endl;
     }
-  } catch (const mc::InputError & e) {
+  } catch (const dr::InputError & e) {
     writeFailed(e.what());
     rc = 2;
   } catch (const std::bad_alloc &) {

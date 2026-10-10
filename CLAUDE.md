@@ -9,8 +9,12 @@ and PCL are far more mature there. Two executables:
 - `pgo_node`: pose graph over `syncai_pointlio`'s odometry and dense body clouds. Keyframes, loop
   closure (small_gicp + `PlanarLoopFactor`), GTSAM iSAM2, the `map -> <robot_id>/pointlio_odom`
   TF, and the `start_mapping` / `save_maps` / `reset_mapping` services plus `mapping_status`.
-- `clean_map`: the detached post-save job `pgo_node` spawns; it ray-casts the saved patches
-  (OctoMap voxel keys, no tree) and rewrites `map.pcd` without people and one-off returns.
+- `clean_map` (`dynamic_removal/`): the detached post-save job `pgo_node` spawns; it ray-casts
+  the saved patches (OctoMap voxel keys, no tree) and rewrites `map.pcd` without people and
+  one-off returns.
+  Its only outputs are `map.pcd` and `map_clean.recipe.json`. dev needs only the 3D `map.pcd`
+  (the 2D map is made from it downstream), so do not add an OctoMap export: OctoMap is used
+  purely as a library for voxel keys and ray traversal.
 
 `README.md` is the authoritative behaviour reference (the run lifecycle, threading, loop
 verification, cleaning `map.pcd`, gotchas). Read the relevant section before changing behaviour.
@@ -18,7 +22,8 @@ verification, cleaning `map.pcd`, gotchas). Read the relevant section before cha
 **The external interface is a cross-repo contract**: the package name `syncai_mapping`, executable
 names, node names / namespaces, topics, services (typed by `syncai_common`), parameters and the
 `/dev/shm/syncai_pgo/<robot_id>` hand-off are used by SyncAI-Robot-Workspace's session specs and
-by the backend. Do not rename any of them casually.
+by the backend. Do not rename any of them casually. Every deliberate deviation from the
+Workspace copy goes in README's "Differences from the Workspace copy", which must stay complete.
 
 **The repo root is the package itself** (`package.xml` and `CMakeLists.txt` are at the root), meant
 to be vcs-imported into the Workspace as `src/syncai_mapping`. `.devcontainer/` and
@@ -50,8 +55,10 @@ docker exec syncai-robot-3d-mapping bash -lc 'cd /workspace && colcon test --pac
   Workspace image (system Eigen, no march-native, TBB on, shared). Keep them in step with the
   Workspace: a GTSAM built with its bundled Eigen or `-march=native` causes Eigen-alignment crashes
   when mixed with PCL. It has no `<depend>` in `package.xml` on purpose.
-- PCL, Eigen and OctoMap come from apt (`ros-humble-pcl-ros`, `libeigen3-dev`,
-  `ros-humble-octomap`).
+- PCL, Eigen, OctoMap and nlohmann/json come from apt (`ros-humble-pcl-ros`, `libeigen3-dev`,
+  `ros-humble-octomap`, `nlohmann-json3-dev`). All JSON this package writes (the
+  `map_cloud_file` notice, `map_clean.recipe.json`) goes through `nlohmann::ordered_json`; do not
+  hand-format JSON again.
 - `syncai_common` and `small_gicp` are colcon packages from `dependencies.repos`; keep those pins in
   step with the Workspace's `interface.repos` / `third-party.repos`.
 

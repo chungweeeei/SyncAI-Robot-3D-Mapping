@@ -11,7 +11,6 @@
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
-#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -26,7 +25,8 @@
 #include <vector>
 
 #include "ament_index_cpp/get_package_prefix.hpp"
-#include "syncai_mapping/map_clean_recipe.hpp"
+#include "nlohmann/json.hpp"
+#include "syncai_mapping/dynamic_removal/recipe.hpp"
 
 extern char ** environ;
 
@@ -34,6 +34,18 @@ namespace syncai_mapping
 {
 
 using namespace std::chrono_literals;
+
+namespace
+{
+
+// "/<robot_id>/pgo" -> "/<robot_id>"; "/pgo" or "/" (a bare run) -> "".
+std::string parentNamespace(const std::string & ns)
+{
+  const auto slash = ns.find_last_of('/');
+  return (slash == std::string::npos || slash == 0) ? std::string() : ns.substr(0, slash);
+}
+
+}  // namespace
 
 PGONode::PGONode() : Node("pgo_node")
 {
@@ -164,7 +176,7 @@ PGONode::~PGONode()
     RCLCPP_WARN(
       this->get_logger(),
       "[PGONode][map_clean] clean_map pid %d for %s continues detached; its outcome lands in %s",
-      child.pid, child.dir.c_str(), map_clean_recipe::kSidecarFile);
+      child.pid, child.dir.c_str(), dynamic_removal::recipe::kSidecarFile);
   }
 }
 
@@ -262,42 +274,8 @@ void PGONode::pruneMapCloudFiles()
   }
 }
 
-std::string PGONode::jsonEscape(const std::string & s)
-{
-  std::string out;
-  out.reserve(s.size() + 2);
-  for (const unsigned char c : s) {
-    switch (c) {
-      case '"':
-        out += "\\\"";
-        break;
-      case '\\':
-        out += "\\\\";
-        break;
-      case '\n':
-        out += "\\n";
-        break;
-      case '\r':
-        out += "\\r";
-        break;
-      case '\t':
-        out += "\\t";
-        break;
-      default:
-        if (c < 0x20) {
-          char buf[8];
-          std::snprintf(buf, sizeof(buf), "\\u%04x", c);
-          out += buf;
-        } else {
-          out += static_cast<char>(c);
-        }
-    }
-  }
-  return out;
-}
-
-// The notice the backend parses. Five fixed fields, hand-formatted so this
-// node grows no JSON dependency:
+// The notice the backend parses. Five fixed fields, in this order (ordered_json
+// keeps insertion order):
 //   seq       monotonic within this process; informational for the reader
 //             (a restart begins again at 1, and the reader applies it anyway)
 //   path      absolute path of the PCD, "" when the map is empty
@@ -308,11 +286,16 @@ std::string PGONode::mapCloudNoticeJson(
   uint64_t seq, const std::string & path, size_t points,
   const builtin_interfaces::msg::Time & time) const
 {
-  std::ostringstream os;
-  os << "{\"seq\":" << seq << ",\"path\":\"" << jsonEscape(path) << "\",\"points\":" << points
-     << ",\"frame_id\":\"" << jsonEscape(m_node_config.map_frame)
-     << "\",\"stamp\":{\"sec\":" << time.sec << ",\"nanosec\":" << time.nanosec << "}}";
-  return os.str();
+  nlohmann::ordered_json j;
+  j["seq"] = seq;
+  j["path"] = path;
+  j["points"] = points;
+  j["frame_id"] = m_node_config.map_frame;
+  j["stamp"]["sec"] = time.sec;
+  j["stamp"]["nanosec"] = time.nanosec;
+  // `replace`, not the default `strict`: map_cloud_dir comes from a parameter
+  // and need not be valid UTF-8, and a notice must not throw over it.
+  return j.dump(-1, ' ', false, nlohmann::ordered_json::error_handler_t::replace);
 }
 
 void PGONode::publishMapCloudNotice(
@@ -370,9 +353,8 @@ void PGONode::writeAndAnnounceMapCloud(
 // config_path, a launch-level override could not touch a single value) and
 // forced the launch file to rewrite the whole YAML into
 // /tmp/syncai_pgo/pgo_<robot_id>.yaml just to inject the robot_id prefix.
-// Declaring them properly is what lets the launch layer the five
-// robot_id-dependent values on top of the shared file, the same way
-// syncai_pointlio's launch layers its two frame names.
+// Declaring them properly is what lets the launch layer the robot_id-dependent
+// values (map_cloud_dir, start_on_launch) on top of the shared file.
 //
 // The defaults repeat the struct defaults (NodeConfig here, PoseGraphOptimizerConfig in
 // pgos/pose_graph_optimizer.h), so a missing key degrades to running the node bare
@@ -388,20 +370,26 @@ void PGONode::writeAndAnnounceMapCloud(
 // at construction, so `ros2 param set` after startup changes nothing.
 void PGONode::loadParameters()
 {
-  // Inputs, frames and the LIO reset service. Absolute topic / service names
-  // on purpose: they live in pointlio's namespace, which a relative name from
-  // inside /<robot_id>/pgo cannot reach, so the launch overrides all of them
-  // per robot_id. The fallbacks here must never contain a robot_id.
-  m_node_config.cloud_topic = this->declare_parameter("cloud_topic", m_node_config.cloud_topic);
-  m_node_config.odom_topic = this->declare_parameter("odom_topic", m_node_config.odom_topic);
-  m_node_config.map_frame = this->declare_parameter("map_frame", m_node_config.map_frame);
-  // Must equal syncai_pointlio's world_frame override (<robot_id>/pointlio_odom):
-  // this node broadcasts map -> local_frame and, unlike the localizer, does NOT
+  // Inputs, frames and the LIO reset service: fixed names, not parameters
+  // (they never change). syncai_pointlio runs at /<robot_id>/pointlio, the
+  // sibling of this node's /<robot_id>/pgo, so everything is derived from the
+  // parent of this node's namespace -- empty for a bare run. Absolute names,
+  // since a relative name from inside /<robot_id>/pgo cannot reach pointlio's
+  // namespace. body_cloud_dense, not body_cloud: the same deskewed scan at 3x
+  // the points, which is what puts enough floor and wall into each keyframe
+  // for clean_map to tell people from structure.
+  const std::string robot_ns = parentNamespace(this->get_namespace());
+  m_node_config.cloud_topic = robot_ns + "/pointlio/body_cloud_dense";
+  m_node_config.odom_topic = robot_ns + "/pointlio/lio_odom";
+  m_node_config.lio_reset_service = robot_ns + "/pointlio/reset";
+  // Must equal syncai_pointlio's world_frame (<robot_id>/pointlio_odom): this
+  // node broadcasts map -> local_frame and, unlike the localizer, does NOT
   // adopt the frame from the incoming odometry header, so a mismatch lands
-  // the correction on a frame nobody looks up.
-  m_node_config.local_frame = this->declare_parameter("local_frame", m_node_config.local_frame);
-  m_node_config.lio_reset_service =
-    this->declare_parameter("lio_reset_service", m_node_config.lio_reset_service);
+  // the correction on a frame nobody looks up. TF frame ids are not
+  // namespaced by ROS, so the robot_id prefix is spelt out without the
+  // leading slash.
+  m_node_config.local_frame =
+    robot_ns.empty() ? "pointlio_odom" : robot_ns.substr(1) + "/pointlio_odom";
   // The launch passes the per-robot subdirectory (<base>/<robot_id>) so two
   // robots on one host never prune each other's files.
   m_node_config.map_cloud_dir =
@@ -420,20 +408,18 @@ void PGONode::loadParameters()
   // match: a bare `10` for a double key is an int64 override that throws
   // InvalidParameterTypeException at startup, and `5.0` for the int key is the
   // mirror-image failure.
-  m_pgo_config.key_pose_delta_deg =
-    this->declare_parameter("key_pose_delta_deg", m_pgo_config.key_pose_delta_deg);
-  m_pgo_config.key_pose_delta_trans =
-    this->declare_parameter("key_pose_delta_trans", m_pgo_config.key_pose_delta_trans);
+  m_pgo_config.keyframe_delta_deg =
+    this->declare_parameter("keyframe_delta_deg", m_pgo_config.keyframe_delta_deg);
+  m_pgo_config.keyframe_delta_m =
+    this->declare_parameter("keyframe_delta_m", m_pgo_config.keyframe_delta_m);
   m_pgo_config.loop_search_radius =
     this->declare_parameter("loop_search_radius", m_pgo_config.loop_search_radius);
   m_pgo_config.loop_time_tresh =
     this->declare_parameter("loop_time_tresh", m_pgo_config.loop_time_tresh);
   m_pgo_config.loop_score_tresh =
     this->declare_parameter("loop_score_tresh", m_pgo_config.loop_score_tresh);
-  m_pgo_config.loop_icp_max_corr_dist =
-    this->declare_parameter("loop_icp_max_corr_dist", m_pgo_config.loop_icp_max_corr_dist);
-  m_pgo_config.loop_registration =
-    this->declare_parameter("loop_registration", m_pgo_config.loop_registration);
+  m_pgo_config.loop_gicp_max_corr_dist =
+    this->declare_parameter("loop_gicp_max_corr_dist", m_pgo_config.loop_gicp_max_corr_dist);
   m_pgo_config.loop_gicp_num_threads =
     this->declare_parameter("loop_gicp_num_threads", m_pgo_config.loop_gicp_num_threads);
   m_pgo_config.loop_gicp_num_neighbors =
@@ -448,20 +434,14 @@ void PGONode::loadParameters()
     this->declare_parameter("loop_noise_xy_sigma_m", m_pgo_config.loop_noise_xy_sigma_m);
   m_pgo_config.keyframe_tilt_sigma_deg =
     this->declare_parameter("keyframe_tilt_sigma_deg", m_pgo_config.keyframe_tilt_sigma_deg);
-  if (m_pgo_config.loop_registration != "gicp" && m_pgo_config.loop_registration != "icp") {
-    RCLCPP_WARN(
-      this->get_logger(), "[PGONode] loop_registration '%s' unknown, using 'gicp'",
-      m_pgo_config.loop_registration.c_str());
-    m_pgo_config.loop_registration = "gicp";
-  }
   RCLCPP_INFO(
     this->get_logger(),
-    "[PGONode] loop verification: %s, max corr dist %.2f m, fitness gate %.3f, planar "
+    "[PGONode] loop verification: gicp, max corr dist %.2f m, fitness gate %.3f, planar "
     "correction %s, roll/pitch/z variance %.1e, planar xy sigma %.3f m%s, planar yaw sigma "
     "%.2f deg%s, keyframe tilt sigma %.2f deg%s",
-    m_pgo_config.loop_registration.c_str(), m_pgo_config.loop_icp_max_corr_dist,
-    m_pgo_config.loop_score_tresh, m_pgo_config.loop_planar_correction ? "on" : "off",
-    m_pgo_config.loop_noise_var_roll_pitch_z, m_pgo_config.loop_noise_xy_sigma_m,
+    m_pgo_config.loop_gicp_max_corr_dist, m_pgo_config.loop_score_tresh,
+    m_pgo_config.loop_planar_correction ? "on" : "off", m_pgo_config.loop_noise_var_roll_pitch_z,
+    m_pgo_config.loop_noise_xy_sigma_m,
     m_pgo_config.loop_noise_xy_sigma_m > 0.0 ? "" : " (<= 0: variance = fitness)",
     m_pgo_config.loop_noise_yaw_sigma_deg,
     m_pgo_config.loop_noise_yaw_sigma_deg > 0.0 ? "" : " (<= 0: variance = fitness)",
@@ -469,45 +449,46 @@ void PGONode::loadParameters()
     m_pgo_config.keyframe_tilt_sigma_deg > 0.0 ? "" : " (<= 0: off)");
   m_pgo_config.loop_submap_half_range =
     this->declare_parameter("loop_submap_half_range", m_pgo_config.loop_submap_half_range);
-  m_pgo_config.submap_resolution =
-    this->declare_parameter("submap_resolution", m_pgo_config.submap_resolution);
-  m_pgo_config.min_loop_detect_duration =
-    this->declare_parameter("min_loop_detect_duration", m_pgo_config.min_loop_detect_duration);
+  m_pgo_config.loop_submap_resolution =
+    this->declare_parameter("loop_submap_resolution", m_pgo_config.loop_submap_resolution);
+  m_pgo_config.loop_search_period =
+    this->declare_parameter("loop_search_period", m_pgo_config.loop_search_period);
 
   // The post-save map cleaning. Handed to clean_map on its command line and
   // recorded in the sidecar, so what a map was cleaned with is on disk beside
-  // it. All doubles except map_clean_nice, map_clean_min_hits and
+  // it. All doubles except map_clean_nice, map_clean_sparse_min_hits and
   // map_clean_dynamic_min_miss (ints) and map_clean_clip_below_floor (bool).
   m_node_config.map_clean_enabled =
     this->declare_parameter("map_clean_enabled", m_node_config.map_clean_enabled);
   m_node_config.map_clean_nice =
     this->declare_parameter("map_clean_nice", m_node_config.map_clean_nice);
   auto & mc = m_node_config.map_clean;
-  mc.resolution = this->declare_parameter("map_clean_resolution", mc.resolution);
+  mc.voxel_size = this->declare_parameter("map_clean_voxel_size", mc.voxel_size);
   mc.max_range = this->declare_parameter("map_clean_max_range", mc.max_range);
   mc.min_range = this->declare_parameter("map_clean_min_range", mc.min_range);
   mc.lidar_height = this->declare_parameter("map_clean_lidar_height", mc.lidar_height);
   mc.floor_band = this->declare_parameter("map_clean_floor_band", mc.floor_band);
-  mc.max_height = this->declare_parameter("map_clean_max_height", mc.max_height);
+  mc.dynamic_max_height =
+    this->declare_parameter("map_clean_dynamic_max_height", mc.dynamic_max_height);
   mc.floor_radius = this->declare_parameter("map_clean_floor_radius", mc.floor_radius);
-  mc.min_hits = this->declare_parameter("map_clean_min_hits", mc.min_hits);
+  mc.sparse_min_hits = this->declare_parameter("map_clean_sparse_min_hits", mc.sparse_min_hits);
   mc.dynamic_miss_ratio =
     this->declare_parameter("map_clean_dynamic_miss_ratio", mc.dynamic_miss_ratio);
   mc.dynamic_min_miss = this->declare_parameter("map_clean_dynamic_min_miss", mc.dynamic_min_miss);
   mc.clip_below_floor = this->declare_parameter("map_clean_clip_below_floor", mc.clip_below_floor);
   RCLCPP_INFO(
     this->get_logger(),
-    "[PGONode] map cleaning after save: %s | %.3f m, range %.1f-%.1f m, lidar height %.3f m, "
-    "floor band %.2f m, max height %.1f m, floor radius %.1f m, min hits %d, dynamic miss ratio "
-    "%.2f, dynamic min miss %d, clip below floor %s, nice %d",
-    m_node_config.map_clean_enabled ? "on" : "off", mc.resolution, mc.min_range, mc.max_range,
-    mc.lidar_height, mc.floor_band, mc.max_height, mc.floor_radius, mc.min_hits,
+    "[PGONode] map cleaning after save: %s | voxel %.3f m, range %.1f-%.1f m, lidar height "
+    "%.3f m, floor band %.2f m, dynamic max height %.1f m, floor radius %.1f m, sparse min hits "
+    "%d, dynamic miss ratio %.2f, dynamic min miss %d, clip below floor %s, nice %d",
+    m_node_config.map_clean_enabled ? "on" : "off", mc.voxel_size, mc.min_range, mc.max_range,
+    mc.lidar_height, mc.floor_band, mc.dynamic_max_height, mc.floor_radius, mc.sparse_min_hits,
     mc.dynamic_miss_ratio, mc.dynamic_min_miss, mc.clip_below_floor ? "on" : "off",
     m_node_config.map_clean_nice);
 
-  // The five values the launch is expected to have overridden. A value here
-  // without a robot_id prefix means the node was started bare, or the
-  // overrides were passed before the params file (later entries win).
+  // The names derived from the namespace, and the launch's overrides. A value
+  // here without a robot_id prefix means the node was started bare (outside
+  // /<robot_id>/pgo), or the overrides were passed before the params file.
   RCLCPP_INFO(
     this->get_logger(),
     "[PGONode] inputs: %s + %s | TF %s -> %s | LIO reset: %s | map_cloud_dir: %s | "
@@ -527,14 +508,13 @@ void PGONode::syncCB(
    * odom_msg: LIO odom -> robot pose
    */
 
-  CloudWithPose cp;
-  cp.pose.setTime(cloud_msg->header.stamp.sec, cloud_msg->header.stamp.nanosec);
+  PendingPair pair;
+  pair.pose.setTime(cloud_msg->header.stamp.sec, cloud_msg->header.stamp.nanosec);
   // Recorded for every pair, taken or not: a start_mapping with reset_lio
   // false gates the new run on "after this call" and this is its boundary.
-  m_state.last_seen_time.store(cp.pose.second);
+  m_state.last_seen_time.store(pair.pose.second);
 
-  // Gate before the expensive part: a pair dropped here costs nothing, while
-  // pcl::fromROSMsg below is a full copy of a lidar frame.
+  // Gate first, so a dropped pair costs nothing.
   //
   // Anything but MAPPING drops the pair -- see NodeState::phase. Dropping
   // rather than buffering is the point: a pair produced before a Start or
@@ -553,9 +533,9 @@ void PGONode::syncCB(
   // old run and > is the whole of the new one. Without this, a single
   // straddling frame anchors a BetweenFactor carrying the entire accumulated
   // drift at 1e-6 variance, and the graph never recovers.
-  if (cp.pose.second <= m_state.accept_after_time.load()) return;
+  if (pair.pose.second <= m_state.accept_after_time.load()) return;
 
-  if (cp.pose.second < m_state.last_message_time) {
+  if (pair.pose.second < m_state.last_message_time) {
     RCLCPP_WARN(this->get_logger(), "Received out of order message");
     return;
   }
@@ -566,18 +546,20 @@ void PGONode::syncCB(
   // unguarded, and got away with it only because rclcpp::spin() serialised
   // syncCB against timerCB. main() now runs a MultiThreadedExecutor, so it
   // would not get away with it any more.
-  std::lock_guard<std::mutex> lock(m_state.message_mutex);
-  m_state.last_message_time = cp.pose.second;
-
-  cp.pose.r = Eigen::Quaterniond(
-                odom_msg->pose.pose.orientation.w, odom_msg->pose.pose.orientation.x,
-                odom_msg->pose.pose.orientation.y, odom_msg->pose.pose.orientation.z)
-                .toRotationMatrix();
-  cp.pose.t = V3D(
+  pair.pose.r = Eigen::Quaterniond(
+                  odom_msg->pose.pose.orientation.w, odom_msg->pose.pose.orientation.x,
+                  odom_msg->pose.pose.orientation.y, odom_msg->pose.pose.orientation.z)
+                  .toRotationMatrix();
+  pair.pose.t = V3D(
     odom_msg->pose.pose.position.x, odom_msg->pose.pose.position.y, odom_msg->pose.pose.position.z);
-  cp.cloud = CloudType::Ptr(new CloudType);
-  pcl::fromROSMsg(*cloud_msg, *cp.cloud);
-  m_state.cloud_buffer.push(cp);
+  // Only a pointer to the cloud: the decode happens in timerCB, and only for
+  // a keyframe.
+  pair.cloud_msg = cloud_msg;
+
+  std::lock_guard<std::mutex> lock(m_state.message_mutex);
+  m_state.last_message_time = pair.pose.second;
+  // Overwrite: an untaken older pair is superseded, never queued.
+  m_state.latest_pair = std::move(pair);
 }
 
 void PGONode::sendBroadCastTF(builtin_interfaces::msg::Time & time)
@@ -698,37 +680,42 @@ void PGONode::timerCB()
   // full discipline.
   std::lock_guard<std::mutex> pgo_lock(m_pgo_mutex);
 
-  CloudWithPose cp;
+  PendingPair pair;
   {
-    // front() used to be read OUTSIDE this block, and the block itself used to
-    // be `std::lock_guard<std::mutex>(m_state.message_mutex);` -- a temporary,
-    // so nothing was ever locked. Both are fixed together: the read and the
-    // drain are one critical section against syncCB, which now runs on a
-    // different executor thread.
+    // Take the newest pair and empty the slot in one O(1) critical section
+    // against syncCB, which runs on a different executor thread.
     std::lock_guard<std::mutex> lock(m_state.message_mutex);
-    if (m_state.cloud_buffer.empty()) return;
-    cp = m_state.cloud_buffer.front();  // Take only the oldest entry
-    // Drain the whole queue
-    while (!m_state.cloud_buffer.empty()) {
-      m_state.cloud_buffer.pop();
-    }
+    if (!m_state.latest_pair) return;
+    pair = std::move(*m_state.latest_pair);
+    m_state.latest_pair.reset();
   }
 
   builtin_interfaces::msg::Time cur_time;
-  cur_time.sec = cp.pose.sec;
-  cur_time.nanosec = cp.pose.nsec;
+  cur_time.sec = pair.pose.sec;
+  cur_time.nanosec = pair.pose.nsec;
 
-  if (!m_pgo->addKeyPose(cp)) {  // Keyframe selection
-    sendBroadCastTF(cur_time);   // Not a keyframe -> only broadcast the transform
+  // Keyframe selection needs only the pose. Not a keyframe -> only broadcast
+  // the transform, and the cloud is never decoded.
+  if (!m_pgo->isKeyPose(pair.pose)) {
+    sendBroadCastTF(cur_time);
     return;
   }
+
+  CloudWithPose cp;
+  cp.pose = pair.pose;
+  cp.cloud = CloudType::Ptr(new CloudType);
+  pcl::fromROSMsg(*pair.cloud_msg, *cp.cloud);
+  pair.cloud_msg.reset();
+  // Re-runs the same isKeyPose() check, which cannot change in between: m_pgo
+  // only changes under m_pgo_mutex, held for this whole body.
+  m_pgo->addKeyPose(cp);
 
   // Search for loop closures
   m_pgo->searchForLoopPairs();
 
   // One line per accepted loop, BEFORE the graph consumes it. This is the only
-  // record of what a closure asked for: the ICP fitness that passed
-  // loop_score_tresh, and the world-frame transform ICP applied to the current
+  // record of what a closure asked for: the GICP fitness that passed
+  // loop_score_tresh, and the world-frame transform GICP applied to the current
   // keyframe, split into translation (z separately, because a loop that lifts
   // the robot is the failure that has actually happened -- see the 2026-10
   // dp1f_1002 replay, where seven corridor loops with |dt| < 0.2 m each added
@@ -742,13 +729,13 @@ void PGONode::timerCB()
     const KeyPoseWithCloud & tgt = m_pgo->keyPoses()[lp.target_id];
     const KeyPoseWithCloud & src = m_pgo->keyPoses()[lp.source_id];
     src_z_before.push_back(src.t_global.z());
-    const double rot_deg = Eigen::AngleAxisd(lp.icp_r).angle() * 180.0 / M_PI;
-    // Where ICP wants the source keyframe, not the transform's raw translation:
+    const double rot_deg = Eigen::AngleAxisd(lp.gicp_r).angle() * 180.0 / M_PI;
+    // Where GICP wants the source keyframe, not the transform's raw translation:
     // with a rotation about the world origin, t alone is meaningless 20 m out.
-    const V3D moved = lp.icp_r * src.t_global + lp.icp_t - src.t_global;
+    const V3D moved = lp.gicp_r * src.t_global + lp.gicp_t - src.t_global;
     RCLCPP_INFO(
       this->get_logger(),
-      "[PGONode][loop] target %zu -> source %zu | fitness %.4f | ICP moves source by "
+      "[PGONode][loop] target %zu -> source %zu | fitness %.4f | GICP moves source by "
       "(%.3f, %.3f, %.3f) m, rot %.2f deg | z before: target %.3f source %.3f (source-target "
       "%+.3f)",
       lp.target_id, lp.source_id, lp.score, moved.x(), moved.y(), moved.z(), rot_deg,
@@ -936,9 +923,8 @@ void PGONode::stopRunLocked(const builtin_interfaces::msg::Time & now)
 
   {
     std::lock_guard<std::mutex> lock(m_state.message_mutex);
-    // swap, not a pop() loop: pop() leaves the deque's capacity behind, and
-    // every entry here drags a full body cloud with it.
-    std::queue<CloudWithPose>().swap(m_state.cloud_buffer);
+    // A pair from the old run must not become the new run's first keyframe.
+    m_state.latest_pair.reset();
     m_state.last_message_time = -1.0;
   }
   m_key_pose_count.store(0);
@@ -1254,7 +1240,7 @@ void PGONode::saveMapsCB(
 // ---- The post-save map cleaning ---------------------------------------------
 //
 // clean_map rewrites map.pcd without people and one-off returns (see
-// map_cleaner.hpp for what and why). A child PROCESS, not a fourth thread,
+// dynamic_removal/remover.hpp for what and why). A child PROCESS, not a fourth thread,
 // for three reasons that each decide it alone:
 //   - Memory. A clean holds a hash map of every hit voxel of the site --
 //     millions of entries, hundreds of MB. In this process that heap would
@@ -1286,11 +1272,12 @@ std::string PGONode::startMapClean(const std::filesystem::path & map_dir, bool h
            "did not keep.";
   }
   const auto & oc = m_node_config.map_clean;
-  const std::string started_at = map_clean_recipe::isoUtcNow();
+  const std::string started_at = dynamic_removal::recipe::isoUtcNow();
   // Before the spawn, synchronously: the backend acts on this response, and
   // the sidecar must already say "converting" when it looks.
   try {
-    map_clean_recipe::writeAtomic(map_dir, map_clean_recipe::converting(oc, started_at));
+    dynamic_removal::recipe::writeAtomic(
+      map_dir, dynamic_removal::recipe::converting(oc, started_at));
   } catch (const std::exception & e) {
     RCLCPP_ERROR(
       this->get_logger(), "[PGONode][map_clean] %s in %s; no clean", e.what(), map_dir.c_str());
@@ -1316,8 +1303,8 @@ std::string PGONode::startMapClean(const std::filesystem::path & map_dir, bool h
   std::vector<std::string> args = {
     exe,
     map_dir.string(),
-    "--resolution",
-    num(oc.resolution),
+    "--voxel-size",
+    num(oc.voxel_size),
     "--max-range",
     num(oc.max_range),
     "--min-range",
@@ -1326,12 +1313,12 @@ std::string PGONode::startMapClean(const std::filesystem::path & map_dir, bool h
     num(oc.lidar_height),
     "--floor-band",
     num(oc.floor_band),
-    "--max-height",
-    num(oc.max_height),
+    "--dynamic-max-height",
+    num(oc.dynamic_max_height),
     "--floor-radius",
     num(oc.floor_radius),
-    "--min-hits",
-    std::to_string(oc.min_hits),
+    "--sparse-min-hits",
+    std::to_string(oc.sparse_min_hits),
     "--dynamic-miss-ratio",
     num(oc.dynamic_miss_ratio),
     "--dynamic-min-miss",
@@ -1373,8 +1360,9 @@ std::string PGONode::startMapClean(const std::filesystem::path & map_dir, bool h
   m_map_clean_children.push_back({pid, map_dir, std::chrono::steady_clock::now()});
   RCLCPP_INFO(
     this->get_logger(),
-    "[PGONode][map_clean] clean_map pid %d started for %s (%.3f m, nice %d); outcome in %s", pid,
-    map_dir.c_str(), oc.resolution, m_node_config.map_clean_nice, map_clean_recipe::kSidecarFile);
+    "[PGONode][map_clean] clean_map pid %d started for %s (voxel %.3f m, nice %d); outcome in %s",
+    pid, map_dir.c_str(), oc.voxel_size, m_node_config.map_clean_nice,
+    dynamic_removal::recipe::kSidecarFile);
   return " People and stray points are being removed from the map in the background; it can "
          "take a few minutes.";
 }
@@ -1385,9 +1373,9 @@ std::string PGONode::failMapClean(
   RCLCPP_ERROR(
     this->get_logger(), "[PGONode][map_clean] %s (for %s)", error.c_str(), map_dir.c_str());
   try {
-    map_clean_recipe::writeAtomic(
-      map_dir, map_clean_recipe::failed(
-                 m_node_config.map_clean, started_at, map_clean_recipe::isoUtcNow(), error));
+    dynamic_removal::recipe::writeAtomic(
+      map_dir, dynamic_removal::recipe::failed(
+                 m_node_config.map_clean, started_at, dynamic_removal::recipe::isoUtcNow(), error));
   } catch (const std::exception & e) {
     // The "converting" written a moment ago stays; a reader ages it out.
     RCLCPP_ERROR(this->get_logger(), "[PGONode][map_clean] %s", e.what());
@@ -1412,7 +1400,7 @@ void PGONode::reapMapCleans()
       RCLCPP_WARN(
         this->get_logger(),
         "[PGONode][map_clean] cannot wait for clean_map pid %d (%s); see %s in %s", it->pid,
-        std::strerror(errno), map_clean_recipe::kSidecarFile, it->dir.c_str());
+        std::strerror(errno), dynamic_removal::recipe::kSidecarFile, it->dir.c_str());
     } else if (WIFEXITED(st) && WEXITSTATUS(st) == 0) {
       RCLCPP_INFO(
         this->get_logger(), "[PGONode][map_clean] clean_map pid %d finished %s in %.0f s", it->pid,
@@ -1421,13 +1409,13 @@ void PGONode::reapMapCleans()
       RCLCPP_ERROR(
         this->get_logger(),
         "[PGONode][map_clean] clean_map pid %d exited %d after %.0f s; %s in %s has the reason",
-        it->pid, WEXITSTATUS(st), secs, map_clean_recipe::kSidecarFile, it->dir.c_str());
+        it->pid, WEXITSTATUS(st), secs, dynamic_removal::recipe::kSidecarFile, it->dir.c_str());
     } else {
       RCLCPP_ERROR(
         this->get_logger(),
         "[PGONode][map_clean] clean_map pid %d killed by signal %d after %.0f s (OOM?); %s in "
         "%s is left at converting",
-        it->pid, WIFSIGNALED(st) ? WTERMSIG(st) : 0, secs, map_clean_recipe::kSidecarFile,
+        it->pid, WIFSIGNALED(st) ? WTERMSIG(st) : 0, secs, dynamic_removal::recipe::kSidecarFile,
         it->dir.c_str());
     }
     it = m_map_clean_children.erase(it);
@@ -1456,12 +1444,12 @@ void PGONode::stopMapCleanFor(const std::filesystem::path & map_dir)
 void PGONode::removeMapCleanOutputs(const std::filesystem::path & map_dir)
 {
   std::error_code ec;
-  std::filesystem::remove(map_dir / map_clean_recipe::kSidecarFile, ec);
+  std::filesystem::remove(map_dir / dynamic_removal::recipe::kSidecarFile, ec);
   // The cleaned map.pcd a killed clean may have left half-written. map.pcd
   // itself is the save's own output, written right after this.
-  std::filesystem::remove(map_dir / (std::string(map_cleaner::kMapFile) + ".tmp"), ec);
+  std::filesystem::remove(map_dir / (std::string(dynamic_removal::kMapFile) + ".tmp"), ec);
   // And the sidecar's per-process `map_clean.recipe.json.<pid>.tmp`.
-  const std::string prefix = std::string(map_clean_recipe::kSidecarFile) + ".";
+  const std::string prefix = std::string(dynamic_removal::recipe::kSidecarFile) + ".";
   for (const auto & entry : std::filesystem::directory_iterator(map_dir, ec)) {
     const std::string name = entry.path().filename().string();
     if (name.rfind(prefix, 0) == 0 && entry.path().extension() == ".tmp") {

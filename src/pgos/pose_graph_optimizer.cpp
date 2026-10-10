@@ -11,12 +11,6 @@ PoseGraphOptimizer::PoseGraphOptimizer(const PoseGraphOptimizerConfig & config) 
   m_r_offset.setIdentity();
   m_t_offset.setZero();
 
-  m_icp.setMaximumIterations(50);
-  m_icp.setMaxCorrespondenceDistance(m_config.loop_icp_max_corr_dist);
-  m_icp.setTransformationEpsilon(1e-6);
-  m_icp.setEuclideanFitnessEpsilon(1e-6);
-  m_icp.setRANSACIterations(0);
-
   // Same settings as syncai_localizer's refine stage, which is the other
   // small_gicp user in the workspace. setNumThreads() has to come before the
   // first setInputTarget() (the kd-tree builder reads it).
@@ -24,7 +18,7 @@ PoseGraphOptimizer::PoseGraphOptimizer(const PoseGraphOptimizerConfig & config) 
   m_gicp.setCorrespondenceRandomness(m_config.loop_gicp_num_neighbors);
   m_gicp.setRegistrationType("GICP");
   m_gicp.setMaximumIterations(50);
-  m_gicp.setMaxCorrespondenceDistance(m_config.loop_icp_max_corr_dist);
+  m_gicp.setMaxCorrespondenceDistance(m_config.loop_gicp_max_corr_dist);
   m_gicp.setTransformationEpsilon(1e-6);
 }
 
@@ -32,15 +26,6 @@ bool PoseGraphOptimizer::alignLoop(
   const CloudType::Ptr & source, const CloudType::Ptr & target, M4F & transform, double & fitness)
 {
   CloudType::Ptr aligned(new CloudType);
-  if (m_config.loop_registration == "icp") {
-    m_icp.setInputSource(source);
-    m_icp.setInputTarget(target);
-    m_icp.align(*aligned);
-    if (!m_icp.hasConverged()) return false;
-    transform = m_icp.getFinalTransformation();
-    fitness = m_icp.getFitnessScore();
-    return true;
-  }
   m_gicp.setInputSource(source);
   m_gicp.setInputTarget(target);
   m_gicp.align(*aligned);
@@ -63,7 +48,7 @@ bool PoseGraphOptimizer::isKeyPose(const PoseWithTime & pose)
     Eigen::Quaterniond(pose.r).angularDistance(Eigen::Quaterniond(last_item.r_local)) * 57.324;
 
   // Either one exceeding its threshold makes this a key pose
-  if (delta_trans > m_config.key_pose_delta_trans || delta_deg > m_config.key_pose_delta_deg)
+  if (delta_trans > m_config.keyframe_delta_m || delta_deg > m_config.keyframe_delta_deg)
     return true;
 
   return false;
@@ -104,9 +89,16 @@ bool PoseGraphOptimizer::addKeyPose(const CloudWithPose & cloud_with_pose)
     // should be this one
     const KeyPoseWithCloud & last_item = m_key_poses.back();
 
-    M3D r_between = last_item.r_local.transpose() * cloud_with_pose.pose.r;  // Relative rotation
+    // Relative rotation
+    M3D r_between = last_item.r_local.transpose() * cloud_with_pose.pose.r;
     // Relative translation
     V3D t_between = last_item.r_local.transpose() * (cloud_with_pose.pose.t - last_item.t_local);
+
+    // i.e. "odom says the robot moved this much between these two keyframes".
+    // Noise variances are ordered (roll, pitch, yaw, x, y, z)
+    // = (1e-6, 1e-6, 1e-6, 1e-4, 1e-4, 1e-6). As standard deviations: rotation
+    // ~0.06 deg, x/y ~1 cm, z ~1 mm. In other words, the short-range relative
+    // odom measurement is trusted very strongly, especially along z.
     gtsam::noiseModel::Diagonal::shared_ptr noise = gtsam::noiseModel::Diagonal::Variances(
       (gtsam::Vector(6) << 1e-6, 1e-6, 1e-6, 1e-4, 1e-4, 1e-6).finished());
     m_graph.add(gtsam::BetweenFactor<gtsam::Pose3>(
@@ -168,11 +160,11 @@ void PoseGraphOptimizer::searchForLoopPairs()
   if (m_key_poses.size() < 10) return;
 
   // cool down time
-  if (m_config.min_loop_detect_duration > 0.0) {
+  if (m_config.loop_search_period > 0.0) {
     if (m_history_pairs.size() > 0) {
       double current_time = m_key_poses.back().time;
       double last_time = m_key_poses[m_history_pairs.back().second].time;
-      if (current_time - last_time < m_config.min_loop_detect_duration) return;
+      if (current_time - last_time < m_config.loop_search_period) return;
     }
   }
 
@@ -218,7 +210,7 @@ void PoseGraphOptimizer::searchForLoopPairs()
 
   if (loop_idx == -1) return;
 
-  /** Point-cloud verification: align with ICP and derive the loop-closure edge.
+  /** Point-cloud verification: align with GICP and derive the loop-closure edge.
     * So far we only know "close in space, far apart in time", which cannot be trusted yet (two
     * different corridors can happen to be close in position too).
     * Target side: the point clouds of the 5 keyframes on each side of the old keyframe (11 in
@@ -226,8 +218,9 @@ void PoseGraphOptimizer::searchForLoopPairs()
     * and downsampled.
     */
   CloudType::Ptr target_cloud =
-    getSubMap(loop_idx, m_config.loop_submap_half_range, m_config.submap_resolution);
-  CloudType::Ptr source_cloud = getSubMap(m_key_poses.size() - 1, 0, m_config.submap_resolution);
+    getSubMap(loop_idx, m_config.loop_submap_half_range, m_config.loop_submap_resolution);
+  CloudType::Ptr source_cloud =
+    getSubMap(m_key_poses.size() - 1, 0, m_config.loop_submap_resolution);
   M4F loop_transform;
   double fitness = 0.0;
   if (!alignLoop(source_cloud, target_cloud, loop_transform, fitness)) return;
@@ -259,8 +252,8 @@ void PoseGraphOptimizer::searchForLoopPairs()
   one_pair.source_id = cur_idx;
   one_pair.target_id = loop_idx;
   one_pair.score = fitness;
-  one_pair.icp_r = loop_transform.block<3, 3>(0, 0).cast<double>();
-  one_pair.icp_t = loop_transform.block<3, 1>(0, 3).cast<double>();
+  one_pair.gicp_r = loop_transform.block<3, 3>(0, 0).cast<double>();
+  one_pair.gicp_t = loop_transform.block<3, 1>(0, 3).cast<double>();
 
   // First apply the correction to the current frame's global pose, giving the corrected current
   // pose
@@ -333,6 +326,31 @@ void PoseGraphOptimizer::smoothAndUpdate()
   // smooth and mapping
   // iSAM2 (Incremental Smoothing and Mapping) is incremental: internally it uses a Bayes tree
   // and only relinearises and re-solves the part that changed.
+  //
+  // Why update() is called more than once: one call is ONE Gauss-Newton-style
+  // step, not a solve to convergence. It adds the new factors / values (only
+  // the first call passes any), relinearises the variables that drifted more
+  // than relinearizeThreshold (0.01) from their linearisation point
+  // (relinearizeSkip = 1: checked on every call), and re-solves the affected
+  // part of the Bayes tree for a new delta. The graph is nonlinear (the
+  // rotations), so a step taken from a linearisation point far from the
+  // solution is only approximate; each further empty update() relinearises at
+  // the improved estimate and steps again.
+  //  - No loop: the new keyframe's initial value comes from the last offset
+  //    and its factors are odometry + tilt anchor, so it starts close and one
+  //    step nearly converges; the second call is the usual extra iteration
+  //    (the same pattern as LIO-SAM).
+  //  - Loop: the loop factor can ask to move the keyframe tens of cm / a few
+  //    degrees, spread along the whole chain, so the first step is coarse.
+  //    Four more iterations let that large correction actually converge
+  //    instead of stopping part-way (calculateBestEstimate() below is the
+  //    linearisation point plus the last delta).
+  // The counts are a fixed heuristic inherited from upstream, not a
+  // convergence check: a small loop may waste a few iterations, a very large
+  // one may still be short. If that ever matters, loop on the norm of
+  // m_isam2->getDelta() with a cap instead. Each iteration costs a
+  // relinearisation of the affected variables (after a loop, most of the
+  // chain); the loop cool-down keeps that infrequent.
   m_isam2->update(m_graph, m_initial_values);
   m_isam2->update();
   if (has_loop) {

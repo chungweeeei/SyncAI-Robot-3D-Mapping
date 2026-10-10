@@ -9,7 +9,6 @@
 #include <pcl/common/transforms.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/kdtree/kdtree_flann.h>
-#include <pcl/registration/icp.h>
 #include <small_gicp/pcl/pcl_registration.hpp>
 
 #include <string>
@@ -34,13 +33,13 @@ struct LoopPair
   M3D r_offset;
   V3D t_offset;
   double score;
-  // The raw ICP result that produced r_offset / t_offset: the rigid transform
+  // The raw GICP result that produced r_offset / t_offset: the rigid transform
   // that moves the source keyframe's WORLD-frame cloud onto the target submap.
   // Kept so pgo_node can log what the loop asked for -- in particular its z
   // component. Before 2026-10 nothing recorded this, and a run whose loop
   // closures lifted the map by 15 cm had to be diagnosed from rviz markers.
-  M3D icp_r;
-  V3D icp_t;
+  M3D gicp_r;
+  V3D gicp_t;
   // (dx, dy, dyaw) of the corrected source relative to the target, in the
   // WORLD frame: the measurement of PlanarLoopFactor when
   // loop_planar_correction is on. r_offset / t_offset above are what the
@@ -50,23 +49,22 @@ struct LoopPair
 
 struct PoseGraphOptimizerConfig
 {
-  double key_pose_delta_deg = 10;
-  double key_pose_delta_trans = 1.0;
+  double keyframe_delta_deg = 10;
+  double keyframe_delta_m = 1.0;
   double loop_search_radius = 1.0;
   double loop_time_tresh = 60.0;
   double loop_score_tresh = 0.15;
-  // Loop verification backend. "gicp": small_gicp's RegistrationPCL (GICP,
-  // the default since 2026-10); "icp": PCL point-to-point ICP, the fork's
-  // original. On the dp1f_1002 replay the PCL ICP returned 1.5-3.7 deg of
-  // rotation and a z 2-7x too large for every corridor loop although the raw
-  // poses already agreed to 5 cm; GICP on the same pairs returned the right
-  // amount (offline check, Open3D: +0.03 m vs +0.13 m).
-  std::string loop_registration = "gicp";
-  // Max correspondence distance (m) for either backend. The fork hard-coded
-  // 10, which in practice disables the gate: a source scan that reaches 30 m
-  // down a corridor pairs its far points with whatever the submap has
-  // nearest, and those pairs steer the solution. 1.0 since 2026-10.
-  double loop_icp_max_corr_dist = 1.0;
+  // Loops are verified with small_gicp's RegistrationPCL (GICP). The fork's
+  // PCL point-to-point ICP was dropped: on the dp1f_1002 replay it returned
+  // 1.5-3.7 deg of rotation and a z 2-7x too large for every corridor loop
+  // although the raw poses already agreed to 5 cm; GICP on the same pairs
+  // returned the right amount (offline check, Open3D: +0.03 m vs +0.13 m).
+  //
+  // Max GICP correspondence distance (m). The fork hard-coded 10, which in
+  // practice disables the gate: a source scan that reaches 30 m down a
+  // corridor pairs its far points with whatever the submap has nearest, and
+  // those pairs steer the solution. 1.0 since 2026-10.
+  double loop_gicp_max_corr_dist = 1.0;
   int loop_gicp_num_threads = 4;
   int loop_gicp_num_neighbors = 20;
   // Constrain only the WORLD-frame x / y / yaw between target and source
@@ -112,8 +110,8 @@ struct PoseGraphOptimizerConfig
   // anchor, the behaviour before 2026-10-09.
   double keyframe_tilt_sigma_deg = 0.5;
   int loop_submap_half_range = 5;
-  double submap_resolution = 0.1;
-  double min_loop_detect_duration = 10.0;
+  double loop_submap_resolution = 0.1;
+  double loop_search_period = 10.0;
 };
 
 class PoseGraphOptimizer
@@ -136,11 +134,10 @@ public:
   void smoothAndUpdate();
 
   CloudType::Ptr getSubMap(int idx, int half_range, double resolution);
-  // Registers source onto target with the configured backend. Returns false
-  // when the backend did not converge; fitness is pcl::Registration's
-  // getFitnessScore() (mean squared nearest-neighbour distance over all source
-  // points) for both backends, so loop_score_tresh means the same thing
-  // whichever is selected.
+  // Registers source onto target with GICP. Returns false when it did not
+  // converge; fitness is pcl::Registration's getFitnessScore() (mean squared
+  // nearest-neighbour distance over all source points), which is what
+  // loop_score_tresh gates.
   bool alignLoop(
     const CloudType::Ptr & source, const CloudType::Ptr & target, M4F & transform,
     double & fitness);
@@ -160,6 +157,5 @@ private:
   std::shared_ptr<gtsam::ISAM2> m_isam2;
   gtsam::Values m_initial_values;
   gtsam::NonlinearFactorGraph m_graph;
-  pcl::IterativeClosestPoint<PointType, PointType> m_icp;
   small_gicp::RegistrationPCL<PointType, PointType> m_gicp;
 };
