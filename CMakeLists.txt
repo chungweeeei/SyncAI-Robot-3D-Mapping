@@ -100,7 +100,7 @@ target_link_libraries(clean_map map_cleaner map_clean_recipe)
 
 # ---- pgo_node: the online pose graph (mapping session) ----------------------
 add_executable(pgo_node
-  src/pgo_main.cpp
+  src/main.cpp
   src/pgo_node.cpp
   src/pgos/commons.cpp
   src/pgos/simple_pgo.cpp
