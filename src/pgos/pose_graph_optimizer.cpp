@@ -89,9 +89,16 @@ bool PoseGraphOptimizer::addKeyPose(const CloudWithPose & cloud_with_pose)
     // should be this one
     const KeyPoseWithCloud & last_item = m_key_poses.back();
 
-    M3D r_between = last_item.r_local.transpose() * cloud_with_pose.pose.r;  // Relative rotation
+    // Relative rotation
+    M3D r_between = last_item.r_local.transpose() * cloud_with_pose.pose.r;
     // Relative translation
     V3D t_between = last_item.r_local.transpose() * (cloud_with_pose.pose.t - last_item.t_local);
+
+    // i.e. "odom says the robot moved this much between these two keyframes".
+    // Noise variances are ordered (roll, pitch, yaw, x, y, z)
+    // = (1e-6, 1e-6, 1e-6, 1e-4, 1e-4, 1e-6). As standard deviations: rotation
+    // ~0.06 deg, x/y ~1 cm, z ~1 mm. In other words, the short-range relative
+    // odom measurement is trusted very strongly, especially along z.
     gtsam::noiseModel::Diagonal::shared_ptr noise = gtsam::noiseModel::Diagonal::Variances(
       (gtsam::Vector(6) << 1e-6, 1e-6, 1e-6, 1e-4, 1e-4, 1e-6).finished());
     m_graph.add(gtsam::BetweenFactor<gtsam::Pose3>(
@@ -318,6 +325,31 @@ void PoseGraphOptimizer::smoothAndUpdate()
   // smooth and mapping
   // iSAM2 (Incremental Smoothing and Mapping) is incremental: internally it uses a Bayes tree
   // and only relinearises and re-solves the part that changed.
+  //
+  // Why update() is called more than once: one call is ONE Gauss-Newton-style
+  // step, not a solve to convergence. It adds the new factors / values (only
+  // the first call passes any), relinearises the variables that drifted more
+  // than relinearizeThreshold (0.01) from their linearisation point
+  // (relinearizeSkip = 1: checked on every call), and re-solves the affected
+  // part of the Bayes tree for a new delta. The graph is nonlinear (the
+  // rotations), so a step taken from a linearisation point far from the
+  // solution is only approximate; each further empty update() relinearises at
+  // the improved estimate and steps again.
+  //  - No loop: the new keyframe's initial value comes from the last offset
+  //    and its factors are odometry + tilt anchor, so it starts close and one
+  //    step nearly converges; the second call is the usual extra iteration
+  //    (the same pattern as LIO-SAM).
+  //  - Loop: the loop factor can ask to move the keyframe tens of cm / a few
+  //    degrees, spread along the whole chain, so the first step is coarse.
+  //    Four more iterations let that large correction actually converge
+  //    instead of stopping part-way (calculateBestEstimate() below is the
+  //    linearisation point plus the last delta).
+  // The counts are a fixed heuristic inherited from upstream, not a
+  // convergence check: a small loop may waste a few iterations, a very large
+  // one may still be short. If that ever matters, loop on the norm of
+  // m_isam2->getDelta() with a cap instead. Each iteration costs a
+  // relinearisation of the affected variables (after a loop, most of the
+  // chain); the loop cool-down keeps that infrequent.
   m_isam2->update(m_graph, m_initial_values);
   m_isam2->update();
   if (has_loop) {
