@@ -32,8 +32,12 @@ Workspace's in-tree copy (with its own params file) has to go at the same time.
   type-checks those (Python's `json` turns `20` into `int`, `20.0` into `float`) sees a float.
   The `map_cloud_file` notice is byte-for-byte the same format.
 - Internal only, no effect on the ROS interface: `SimplePGO` is `PoseGraphOptimizer`
-  (`pgos/pose_graph_optimizer.*`), its `Config` is `PoseGraphOptimizerConfig`, and
-  `src/pgo_main.cpp` is `src/main.cpp`.
+  (`pgos/pose_graph_optimizer.*`), its `Config` is `PoseGraphOptimizerConfig`,
+  `src/pgo_main.cpp` is `src/main.cpp`, and the map cleaning lives in `dynamic_removal/`:
+  `map_cleaner.*` is `dynamic_removal/remover.*` (namespace `dynamic_removal`),
+  `map_clean_recipe.*` is `dynamic_removal/recipe.*` (`dynamic_removal::recipe`) and
+  `clean_map_main.cpp` is `dynamic_removal/main.cpp`. The executable is still `clean_map`, and
+  the `map_clean_*` parameters and `map_clean.recipe.json` keep their names.
 
 ## Development environment
 
@@ -107,7 +111,8 @@ had to. Two things did change: the two service **types** are
 caller, builds against that package and had to switch its imports), and
 configuration is declared ROS parameters instead of a yaml-cpp `config_path`.
 `pgos/` is the ported graph (`pose_graph_optimizer.*`, `commons.*`, upstream lineage,
-MIT); `pgo_node.*` is the ROS shell.
+MIT); `pgo_node.*` is the ROS shell; `dynamic_removal/` is the post-save map cleaning
+(`clean_map`).
 
 ## Inputs
 
@@ -406,7 +411,7 @@ bag-replay affordance, not something the console sends. The `.srv` comments in
 
 ### Threading
 
-`main.cpp` runs a 3-thread `MultiThreadedExecutor` with three callback groups,
+`src/main.cpp` (pgo_node's) runs a 3-thread `MultiThreadedExecutor` with three callback groups,
 and that is correctness, not performance: the default group keeps the timer,
 both subscriptions, the 1 s status timer and `save_maps` serialised as
 `rclcpp::spin()` did; a second group runs `start_mapping` and `reset_mapping`

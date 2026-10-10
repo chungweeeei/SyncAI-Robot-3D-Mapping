@@ -1,5 +1,5 @@
-#ifndef SYNCAI_MAPPING__MAP_CLEAN_RECIPE_HPP_
-#define SYNCAI_MAPPING__MAP_CLEAN_RECIPE_HPP_
+#ifndef SYNCAI_MAPPING__DYNAMIC_REMOVAL__RECIPE_HPP_
+#define SYNCAI_MAPPING__DYNAMIC_REMOVAL__RECIPE_HPP_
 
 // map_clean.recipe.json: the map cleaning's status, beside map.pcd in the map
 // directory. It is the clean's only status surface -- the backend reads it
@@ -23,9 +23,9 @@
 #include <filesystem>
 #include <string>
 
-#include "syncai_mapping/map_cleaner.hpp"
+#include "syncai_mapping/dynamic_removal/remover.hpp"
 
-namespace syncai_mapping::map_clean_recipe
+namespace syncai_mapping::dynamic_removal::recipe
 {
 
 inline constexpr const char * kSidecarFile = "map_clean.recipe.json";
@@ -33,19 +33,19 @@ inline constexpr const char * kSidecarFile = "map_clean.recipe.json";
 // "2026-10-08T03:12:45Z".
 std::string isoUtcNow();
 
-std::string converting(const map_cleaner::Params & params, const std::string & started_at);
+std::string converting(const Params & params, const std::string & started_at);
 std::string ok(
-  const map_cleaner::Params & params, const std::string & started_at,
-  const std::string & finished_at, const map_cleaner::Measurements & m);
+  const Params & params, const std::string & started_at, const std::string & finished_at,
+  const Measurements & m);
 // `error` is flattened to one line.
 std::string failed(
-  const map_cleaner::Params & params, const std::string & started_at,
-  const std::string & finished_at, const std::string & error);
+  const Params & params, const std::string & started_at, const std::string & finished_at,
+  const std::string & error);
 
 // <dir>/map_clean.recipe.json via .tmp + rename, so a reader polling it never
 // sees half a document. Throws std::runtime_error (path-free text).
 void writeAtomic(const std::filesystem::path & dir, const std::string & json);
 
-}  // namespace syncai_mapping::map_clean_recipe
+}  // namespace syncai_mapping::dynamic_removal::recipe
 
-#endif  // SYNCAI_MAPPING__MAP_CLEAN_RECIPE_HPP_
+#endif  // SYNCAI_MAPPING__DYNAMIC_REMOVAL__RECIPE_HPP_

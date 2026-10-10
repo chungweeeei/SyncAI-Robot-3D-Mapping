@@ -33,15 +33,15 @@
 #include <iostream>
 #include <string>
 
-#include "syncai_mapping/map_clean_recipe.hpp"
-#include "syncai_mapping/map_cleaner.hpp"
+#include "syncai_mapping/dynamic_removal/recipe.hpp"
+#include "syncai_mapping/dynamic_removal/remover.hpp"
 
 namespace
 {
 
 namespace fs = std::filesystem;
-namespace mc = syncai_mapping::map_cleaner;
-namespace recipe = syncai_mapping::map_clean_recipe;
+namespace dr = syncai_mapping::dynamic_removal;
+namespace recipe = syncai_mapping::dynamic_removal::recipe;
 
 volatile std::sig_atomic_t g_stop_signal = 0;
 
@@ -121,7 +121,7 @@ int main(int argc, char ** argv)
 {
   std::string dir_arg, lock_path = "/dev/shm/syncai_pgo/clean_map.lock", started_at;
   int nice_value = 0;
-  mc::Params params;
+  dr::Params params;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "-h" || a == "--help") {
@@ -243,10 +243,10 @@ int main(int argc, char ** argv)
 
   std::cout << "[clean_map] cleaning " << dir.string() << " at " << params.resolution
             << " m (max range " << params.max_range << " m)" << std::endl;
-  mc::Measurements m;
+  dr::Measurements m;
   int rc = 0;
   try {
-    const bool done = mc::clean(dir, params, m, [](const char * stage, size_t done, size_t total) {
+    const bool done = dr::clean(dir, params, m, [](const char * stage, size_t done, size_t total) {
       if (done % 100 == 0) {
         std::cout << "[clean_map] " << stage << " " << done << "/" << total << " keyframes"
                   << std::endl;
@@ -271,7 +271,7 @@ int main(int argc, char ** argv)
                 << " map_points_kept=" << m.map_points_kept << " clipped_rays=" << m.clipped_rays
                 << " in " << m.elapsed_s << " s" << std::endl;
     }
-  } catch (const mc::InputError & e) {
+  } catch (const dr::InputError & e) {
     writeFailed(e.what());
     rc = 2;
   } catch (const std::bad_alloc &) {

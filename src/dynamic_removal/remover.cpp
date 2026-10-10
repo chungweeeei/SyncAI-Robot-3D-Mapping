@@ -1,4 +1,4 @@
-#include "syncai_mapping/map_cleaner.hpp"
+#include "syncai_mapping/dynamic_removal/remover.hpp"
 
 #include <octomap/octomap.h>
 #include <pcl/common/transforms.h>
@@ -21,7 +21,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace syncai_mapping::map_cleaner
+namespace syncai_mapping::dynamic_removal
 {
 
 namespace
@@ -409,4 +409,4 @@ bool clean(
   }
 }
 
-}  // namespace syncai_mapping::map_cleaner
+}  // namespace syncai_mapping::dynamic_removal

@@ -61,7 +61,7 @@ find_package(small_gicp REQUIRED)
 # apt -- the rosdep key `octomap`, in the Dockerfile's dev stage -- rather than
 # a src/third-party checkout: upstream's top level would also put octovis and
 # dynamicEDT3D into every colcon build. Its config sets OCTOMAP_INCLUDE_DIRS /
-# OCTOMAP_LIBRARIES. No tree is ever built (see map_cleaner.hpp).
+# OCTOMAP_LIBRARIES. No tree is ever built (see dynamic_removal/remover.hpp).
 find_package(octomap REQUIRED)
 # The JSON this package writes: pgo_node's map_cloud_file notice and
 # map_clean.recipe.json (both pgo_node and clean_map write the latter).
@@ -85,23 +85,23 @@ set(SYNCAI_MAPPING_DEPS
 # Split so pgo_node links neither OctoMap nor the ray-cast: it only writes the
 # "converting" sidecar and spawns clean_map, which does the rest in its own
 # process (see PGONode::startMapClean for why a process).
-add_library(map_clean_recipe STATIC src/map_clean_recipe.cpp)
-target_include_directories(map_clean_recipe PUBLIC
+add_library(dynamic_removal_recipe STATIC src/dynamic_removal/recipe.cpp)
+target_include_directories(dynamic_removal_recipe PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
-target_link_libraries(map_clean_recipe PRIVATE nlohmann_json::nlohmann_json)
+target_link_libraries(dynamic_removal_recipe PRIVATE nlohmann_json::nlohmann_json)
 
-add_library(map_cleaner STATIC src/map_cleaner.cpp)
-target_include_directories(map_cleaner PUBLIC
+add_library(dynamic_removal STATIC src/dynamic_removal/remover.cpp)
+target_include_directories(dynamic_removal PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
   ${OCTOMAP_INCLUDE_DIRS}
   ${EIGEN3_INCLUDE_DIR}
   ${PCL_INCLUDE_DIRS})
-target_link_libraries(map_cleaner PUBLIC ${OCTOMAP_LIBRARIES} ${PCL_LIBRARIES})
+target_link_libraries(dynamic_removal PUBLIC ${OCTOMAP_LIBRARIES} ${PCL_LIBRARIES})
 
-add_executable(clean_map src/clean_map_main.cpp)
-target_link_libraries(clean_map map_cleaner map_clean_recipe)
+add_executable(clean_map src/dynamic_removal/main.cpp)
+target_link_libraries(clean_map dynamic_removal dynamic_removal_recipe)
 
 # ---- pgo_node: the online pose graph (mapping session) ----------------------
 add_executable(pgo_node
@@ -123,7 +123,7 @@ target_link_libraries(pgo_node
   ${PCL_LIBRARIES}
   gtsam
   small_gicp::small_gicp
-  map_clean_recipe
+  dynamic_removal_recipe
   nlohmann_json::nlohmann_json
 )
 

@@ -1,10 +1,10 @@
-#ifndef SYNCAI_MAPPING__MAP_CLEANER_HPP_
-#define SYNCAI_MAPPING__MAP_CLEANER_HPP_
+#ifndef SYNCAI_MAPPING__DYNAMIC_REMOVAL__REMOVER_HPP_
+#define SYNCAI_MAPPING__DYNAMIC_REMOVAL__REMOVER_HPP_
 
 // The post-save map cleaning: a pgo save directory (patches/<i>.pcd +
 // poses.txt) ray-cast keyframe by keyframe to find the voxels that are people
 // or one-off returns, and map.pcd rewritten without their points. Run by
-// clean_map (clean_map_main.cpp), which pgo_node spawns after a successful
+// clean_map (dynamic_removal/main.cpp), which pgo_node spawns after a successful
 // save_maps with save_patches; the README's "Cleaning map.pcd" has the
 // process model and the numbers.
 //
@@ -23,7 +23,7 @@
 //
 // This header deliberately includes no OctoMap or PCL header: pgo_node
 // includes it for Params (its ROS parameters) and the file names, and links
-// neither library. Only map_cleaner.cpp does.
+// neither library. Only dynamic_removal/remover.cpp does.
 
 #include <cstddef>
 #include <filesystem>
@@ -31,7 +31,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace syncai_mapping::map_cleaner
+namespace syncai_mapping::dynamic_removal
 {
 
 // pgo writes map.pcd at save time, raw; the clean REPLACES it with the same
@@ -132,6 +132,6 @@ bool clean(
   const std::filesystem::path & dir, const Params & params, Measurements & out,
   const Progress & progress = {});
 
-}  // namespace syncai_mapping::map_cleaner
+}  // namespace syncai_mapping::dynamic_removal
 
-#endif  // SYNCAI_MAPPING__MAP_CLEANER_HPP_
+#endif  // SYNCAI_MAPPING__DYNAMIC_REMOVAL__REMOVER_HPP_

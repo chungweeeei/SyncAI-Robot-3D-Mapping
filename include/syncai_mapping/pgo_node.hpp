@@ -51,7 +51,7 @@
 #include "syncai_common/srv/reset_mapping.hpp"
 #include "syncai_common/srv/save_maps.hpp"
 #include "syncai_common/srv/start_mapping.hpp"
-#include "syncai_mapping/map_cleaner.hpp"
+#include "syncai_mapping/dynamic_removal/remover.hpp"
 #include "syncai_mapping/pgos/commons.h"
 #include "syncai_mapping/pgos/pose_graph_optimizer.h"
 #include "visualization_msgs/msg/marker.hpp"
@@ -90,11 +90,11 @@ struct NodeConfig
   bool start_on_launch = false;
   // The post-save map cleaning (see startMapClean): whether a successful
   // save_maps with save_patches spawns clean_map, the nice value it runs at,
-  // and the parameters it is handed on its command line. map_cleaner::Params
+  // and the parameters it is handed on its command line. dynamic_removal::Params
   // carries the defaults and the why of each.
   bool map_clean_enabled = true;
   int map_clean_nice = 10;
-  map_cleaner::Params map_clean;
+  dynamic_removal::Params map_clean;
 };
 
 // One synchronised cloud+odom pair, as syncCB hands it to timerCB: the pose

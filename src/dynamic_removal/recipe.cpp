@@ -1,4 +1,4 @@
-#include "syncai_mapping/map_clean_recipe.hpp"
+#include "syncai_mapping/dynamic_removal/recipe.hpp"
 
 #include <unistd.h>
 
@@ -9,7 +9,7 @@
 
 #include "nlohmann/json.hpp"
 
-namespace syncai_mapping::map_clean_recipe
+namespace syncai_mapping::dynamic_removal::recipe
 {
 
 namespace
@@ -30,7 +30,7 @@ Json head(const char * status, const std::string & started_at)
   return j;
 }
 
-Json paramsJson(const map_cleaner::Params & p)
+Json paramsJson(const Params & p)
 {
   Json j;
   j["resolution"] = p.resolution;
@@ -67,7 +67,7 @@ std::string isoUtcNow()
   return buf;
 }
 
-std::string converting(const map_cleaner::Params & params, const std::string & started_at)
+std::string converting(const Params & params, const std::string & started_at)
 {
   Json j = head("converting", started_at);
   j["params"] = paramsJson(params);
@@ -75,8 +75,8 @@ std::string converting(const map_cleaner::Params & params, const std::string & s
 }
 
 std::string ok(
-  const map_cleaner::Params & params, const std::string & started_at,
-  const std::string & finished_at, const map_cleaner::Measurements & m)
+  const Params & params, const std::string & started_at, const std::string & finished_at,
+  const Measurements & m)
 {
   Json j = head("ok", started_at);
   j["finished_at"] = finished_at;
@@ -95,8 +95,8 @@ std::string ok(
 }
 
 std::string failed(
-  const map_cleaner::Params & params, const std::string & started_at,
-  const std::string & finished_at, const std::string & error)
+  const Params & params, const std::string & started_at, const std::string & finished_at,
+  const std::string & error)
 {
   std::string line = error;
   for (char & c : line) {
@@ -136,4 +136,4 @@ void writeAtomic(const std::filesystem::path & dir, const std::string & json)
   }
 }
 
-}  // namespace syncai_mapping::map_clean_recipe
+}  // namespace syncai_mapping::dynamic_removal::recipe

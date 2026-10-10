@@ -26,7 +26,7 @@
 
 #include "ament_index_cpp/get_package_prefix.hpp"
 #include "nlohmann/json.hpp"
-#include "syncai_mapping/map_clean_recipe.hpp"
+#include "syncai_mapping/dynamic_removal/recipe.hpp"
 
 extern char ** environ;
 
@@ -176,7 +176,7 @@ PGONode::~PGONode()
     RCLCPP_WARN(
       this->get_logger(),
       "[PGONode][map_clean] clean_map pid %d for %s continues detached; its outcome lands in %s",
-      child.pid, child.dir.c_str(), map_clean_recipe::kSidecarFile);
+      child.pid, child.dir.c_str(), dynamic_removal::recipe::kSidecarFile);
   }
 }
 
@@ -1239,7 +1239,7 @@ void PGONode::saveMapsCB(
 // ---- The post-save map cleaning ---------------------------------------------
 //
 // clean_map rewrites map.pcd without people and one-off returns (see
-// map_cleaner.hpp for what and why). A child PROCESS, not a fourth thread,
+// dynamic_removal/remover.hpp for what and why). A child PROCESS, not a fourth thread,
 // for three reasons that each decide it alone:
 //   - Memory. A clean holds a hash map of every hit voxel of the site --
 //     millions of entries, hundreds of MB. In this process that heap would
@@ -1271,11 +1271,12 @@ std::string PGONode::startMapClean(const std::filesystem::path & map_dir, bool h
            "did not keep.";
   }
   const auto & oc = m_node_config.map_clean;
-  const std::string started_at = map_clean_recipe::isoUtcNow();
+  const std::string started_at = dynamic_removal::recipe::isoUtcNow();
   // Before the spawn, synchronously: the backend acts on this response, and
   // the sidecar must already say "converting" when it looks.
   try {
-    map_clean_recipe::writeAtomic(map_dir, map_clean_recipe::converting(oc, started_at));
+    dynamic_removal::recipe::writeAtomic(
+      map_dir, dynamic_removal::recipe::converting(oc, started_at));
   } catch (const std::exception & e) {
     RCLCPP_ERROR(
       this->get_logger(), "[PGONode][map_clean] %s in %s; no clean", e.what(), map_dir.c_str());
@@ -1359,7 +1360,8 @@ std::string PGONode::startMapClean(const std::filesystem::path & map_dir, bool h
   RCLCPP_INFO(
     this->get_logger(),
     "[PGONode][map_clean] clean_map pid %d started for %s (%.3f m, nice %d); outcome in %s", pid,
-    map_dir.c_str(), oc.resolution, m_node_config.map_clean_nice, map_clean_recipe::kSidecarFile);
+    map_dir.c_str(), oc.resolution, m_node_config.map_clean_nice,
+    dynamic_removal::recipe::kSidecarFile);
   return " People and stray points are being removed from the map in the background; it can "
          "take a few minutes.";
 }
@@ -1370,9 +1372,9 @@ std::string PGONode::failMapClean(
   RCLCPP_ERROR(
     this->get_logger(), "[PGONode][map_clean] %s (for %s)", error.c_str(), map_dir.c_str());
   try {
-    map_clean_recipe::writeAtomic(
-      map_dir, map_clean_recipe::failed(
-                 m_node_config.map_clean, started_at, map_clean_recipe::isoUtcNow(), error));
+    dynamic_removal::recipe::writeAtomic(
+      map_dir, dynamic_removal::recipe::failed(
+                 m_node_config.map_clean, started_at, dynamic_removal::recipe::isoUtcNow(), error));
   } catch (const std::exception & e) {
     // The "converting" written a moment ago stays; a reader ages it out.
     RCLCPP_ERROR(this->get_logger(), "[PGONode][map_clean] %s", e.what());
@@ -1397,7 +1399,7 @@ void PGONode::reapMapCleans()
       RCLCPP_WARN(
         this->get_logger(),
         "[PGONode][map_clean] cannot wait for clean_map pid %d (%s); see %s in %s", it->pid,
-        std::strerror(errno), map_clean_recipe::kSidecarFile, it->dir.c_str());
+        std::strerror(errno), dynamic_removal::recipe::kSidecarFile, it->dir.c_str());
     } else if (WIFEXITED(st) && WEXITSTATUS(st) == 0) {
       RCLCPP_INFO(
         this->get_logger(), "[PGONode][map_clean] clean_map pid %d finished %s in %.0f s", it->pid,
@@ -1406,13 +1408,13 @@ void PGONode::reapMapCleans()
       RCLCPP_ERROR(
         this->get_logger(),
         "[PGONode][map_clean] clean_map pid %d exited %d after %.0f s; %s in %s has the reason",
-        it->pid, WEXITSTATUS(st), secs, map_clean_recipe::kSidecarFile, it->dir.c_str());
+        it->pid, WEXITSTATUS(st), secs, dynamic_removal::recipe::kSidecarFile, it->dir.c_str());
     } else {
       RCLCPP_ERROR(
         this->get_logger(),
         "[PGONode][map_clean] clean_map pid %d killed by signal %d after %.0f s (OOM?); %s in "
         "%s is left at converting",
-        it->pid, WIFSIGNALED(st) ? WTERMSIG(st) : 0, secs, map_clean_recipe::kSidecarFile,
+        it->pid, WIFSIGNALED(st) ? WTERMSIG(st) : 0, secs, dynamic_removal::recipe::kSidecarFile,
         it->dir.c_str());
     }
     it = m_map_clean_children.erase(it);
@@ -1441,12 +1443,12 @@ void PGONode::stopMapCleanFor(const std::filesystem::path & map_dir)
 void PGONode::removeMapCleanOutputs(const std::filesystem::path & map_dir)
 {
   std::error_code ec;
-  std::filesystem::remove(map_dir / map_clean_recipe::kSidecarFile, ec);
+  std::filesystem::remove(map_dir / dynamic_removal::recipe::kSidecarFile, ec);
   // The cleaned map.pcd a killed clean may have left half-written. map.pcd
   // itself is the save's own output, written right after this.
-  std::filesystem::remove(map_dir / (std::string(map_cleaner::kMapFile) + ".tmp"), ec);
+  std::filesystem::remove(map_dir / (std::string(dynamic_removal::kMapFile) + ".tmp"), ec);
   // And the sidecar's per-process `map_clean.recipe.json.<pid>.tmp`.
-  const std::string prefix = std::string(map_clean_recipe::kSidecarFile) + ".";
+  const std::string prefix = std::string(dynamic_removal::recipe::kSidecarFile) + ".";
   for (const auto & entry : std::filesystem::directory_iterator(map_dir, ec)) {
     const std::string name = entry.path().filename().string();
     if (name.rfind(prefix, 0) == 0 && entry.path().extension() == ".tmp") {
