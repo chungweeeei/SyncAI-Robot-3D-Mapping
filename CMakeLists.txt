@@ -103,7 +103,7 @@ add_executable(pgo_node
   src/main.cpp
   src/pgo_node.cpp
   src/pgos/commons.cpp
-  src/pgos/simple_pgo.cpp
+  src/pgos/pose_graph_optimizer.cpp
 )
 target_include_directories(pgo_node PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

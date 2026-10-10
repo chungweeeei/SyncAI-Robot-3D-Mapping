@@ -1,6 +1,6 @@
-#include "syncai_mapping/pgos/simple_pgo.h"
+#include "syncai_mapping/pgos/pose_graph_optimizer.h"
 
-SimplePGO::SimplePGO(const Config & config) : m_config(config)
+PoseGraphOptimizer::PoseGraphOptimizer(const PoseGraphOptimizerConfig & config) : m_config(config)
 {
   gtsam::ISAM2Params isam2_params;
   isam2_params.relinearizeThreshold = 0.01;
@@ -28,7 +28,7 @@ SimplePGO::SimplePGO(const Config & config) : m_config(config)
   m_gicp.setTransformationEpsilon(1e-6);
 }
 
-bool SimplePGO::alignLoop(
+bool PoseGraphOptimizer::alignLoop(
   const CloudType::Ptr & source, const CloudType::Ptr & target, M4F & transform, double & fitness)
 {
   CloudType::Ptr aligned(new CloudType);
@@ -50,7 +50,7 @@ bool SimplePGO::alignLoop(
   return true;
 }
 
-bool SimplePGO::isKeyPose(const PoseWithTime & pose)
+bool PoseGraphOptimizer::isKeyPose(const PoseWithTime & pose)
 {
   // The first pose is accepted unconditionally
   if (m_key_poses.size() == 0) return true;
@@ -69,7 +69,7 @@ bool SimplePGO::isKeyPose(const PoseWithTime & pose)
   return false;
 }
 
-bool SimplePGO::addKeyPose(const CloudWithPose & cloud_with_pose)
+bool PoseGraphOptimizer::addKeyPose(const CloudWithPose & cloud_with_pose)
 {
   bool is_key_pose = isKeyPose(cloud_with_pose.pose);
   if (!is_key_pose) return false;
@@ -138,7 +138,7 @@ bool SimplePGO::addKeyPose(const CloudWithPose & cloud_with_pose)
   return true;
 }
 
-CloudType::Ptr SimplePGO::getSubMap(int idx, int half_range, double resolution)
+CloudType::Ptr PoseGraphOptimizer::getSubMap(int idx, int half_range, double resolution)
 {
   assert(idx >= 0 && idx < static_cast<int>(m_key_poses.size()));
   int min_idx = std::max(0, idx - half_range);
@@ -162,7 +162,7 @@ CloudType::Ptr SimplePGO::getSubMap(int idx, int half_range, double resolution)
   return ret;
 }
 
-void SimplePGO::searchForLoopPairs()
+void PoseGraphOptimizer::searchForLoopPairs()
 {
   // The trajectory is still too short to have possibly looped back on itself.
   if (m_key_poses.size() < 10) return;
@@ -290,7 +290,7 @@ void SimplePGO::searchForLoopPairs()
   m_history_pairs.emplace_back(one_pair.target_id, one_pair.source_id);
 }
 
-void SimplePGO::smoothAndUpdate()
+void PoseGraphOptimizer::smoothAndUpdate()
 {
   bool has_loop = !m_cache_pairs.empty();
 

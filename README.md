@@ -80,7 +80,7 @@ had to. Two things did change: the two service **types** are
 `syncai_common/srv/SaveMaps` and `ResetMapping` now (the backend, their only
 caller, builds against that package and had to switch its imports), and
 configuration is declared ROS parameters instead of a yaml-cpp `config_path`.
-`pgos/` is the ported graph (`simple_pgo.*`, `commons.*`, upstream lineage,
+`pgos/` is the ported graph (`pose_graph_optimizer.*`, `commons.*`, upstream lineage,
 MIT); `pgo_node.*` is the ROS shell.
 
 ## Inputs
@@ -342,7 +342,7 @@ destroyed:
    Any failure returns here with the state intact and says so.
 3. **Rebuild the graph** under the mutex (`stopRunLocked`, shared with the
    save): join an in-flight merge (so the old map cannot be published after
-   the empty one), construct a fresh `SimplePGO` (the constructor *is* the
+   the empty one), construct a fresh `PoseGraphOptimizer` (the constructor *is* the
    reset — `gtsam::ISAM2` has no clear), swap the buffer, zero the counters,
    publish the empty map and a DELETEALL for the markers; then set
    `accept_after_time` and the phase `MAPPING`.
@@ -354,7 +354,7 @@ destroyed:
    so it is exact.
 
 **Why a start is a reset.** The graph's origin is the odometry origin
-(`SimplePGO` anchors its first keyframe at `offset × local pose`), so "begin
+(`PoseGraphOptimizer` anchors its first keyframe at `offset × local pose`), so "begin
 a clean run from where the robot stands" is literally true only when pointlio
 is reset too — which also frees the ikd-tree it has been growing since the
 session came up.

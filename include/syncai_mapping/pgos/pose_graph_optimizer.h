@@ -48,7 +48,7 @@ struct LoopPair
   V3D planar_meas;
 };
 
-struct Config
+struct PoseGraphOptimizerConfig
 {
   double key_pose_delta_deg = 10;
   double key_pose_delta_trans = 1.0;
@@ -116,10 +116,10 @@ struct Config
   double min_loop_detect_duration = 10.0;
 };
 
-class SimplePGO
+class PoseGraphOptimizer
 {
 public:
-  SimplePGO(const Config & config);
+  PoseGraphOptimizer(const PoseGraphOptimizerConfig & config);
 
   bool isKeyPose(const PoseWithTime & pose);
 
@@ -151,7 +151,7 @@ public:
   V3D offsetT() { return m_t_offset; }
 
 private:
-  Config m_config;
+  PoseGraphOptimizerConfig m_config;
   std::vector<KeyPoseWithCloud> m_key_poses;
   std::vector<std::pair<size_t, size_t>> m_history_pairs;
   std::vector<LoopPair> m_cache_pairs;

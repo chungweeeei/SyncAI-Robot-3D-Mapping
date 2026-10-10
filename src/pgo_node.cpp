@@ -39,7 +39,7 @@ PGONode::PGONode() : Node("pgo_node")
 {
   RCLCPP_INFO(this->get_logger(), "PGO node started");
   loadParameters();
-  m_pgo = std::make_shared<SimplePGO>(m_pgo_config);
+  m_pgo = std::make_shared<PoseGraphOptimizer>(m_pgo_config);
   rclcpp::QoS qos = rclcpp::QoS(10);
   m_cloud_sub.subscribe(this, m_node_config.cloud_topic, qos.get_rmw_qos_profile());
   m_odom_sub.subscribe(this, m_node_config.odom_topic, qos.get_rmw_qos_profile());
@@ -374,8 +374,8 @@ void PGONode::writeAndAnnounceMapCloud(
 // robot_id-dependent values on top of the shared file, the same way
 // syncai_pointlio's launch layers its two frame names.
 //
-// The defaults repeat the struct defaults (NodeConfig here, Config in
-// pgos/simple_pgo.h), so a missing key degrades to running the node bare
+// The defaults repeat the struct defaults (NodeConfig here, PoseGraphOptimizerConfig in
+// pgos/pose_graph_optimizer.h), so a missing key degrades to running the node bare
 // instead of throwing -- a deliberate change from the yaml-cpp loader, where
 // twelve of these keys were required and a missing one was an InvalidNode
 // exception at construction. The trade is that a misspelt key silently uses
@@ -383,7 +383,7 @@ void PGONode::writeAndAnnounceMapCloud(
 // counterweight, because a bare-run pgo subscribes to a topic nothing
 // publishes and would otherwise just be silent.
 //
-// Read once. m_pgo_config is copied into SimplePGO at construction and again
+// Read once. m_pgo_config is copied into PoseGraphOptimizer at construction and again
 // on every reset, and the message_filters subscribers take their topic names
 // at construction, so `ros2 param set` after startup changes nothing.
 void PGONode::loadParameters()
@@ -415,7 +415,7 @@ void PGONode::loadParameters()
   m_node_config.start_on_launch =
     this->declare_parameter("start_on_launch", m_node_config.start_on_launch);
 
-  // PGO math (pgos/simple_pgo.h Config). All doubles except
+  // PGO math (pgos/pose_graph_optimizer.h PoseGraphOptimizerConfig). All doubles except
   // loop_submap_half_range, which is an int -- and the params file has to
   // match: a bare `10` for a double key is an int64 override that throws
   // InvalidParameterTypeException at startup, and `5.0` for the int key is the
@@ -598,7 +598,7 @@ void PGONode::sendBroadCastTF(builtin_interfaces::msg::Time & time)
   m_tf_broadcaster->sendTransform(transformStamped);
 }
 
-// Identity is also what a fresh SimplePGO's offset is, so the first keyframe
+// Identity is also what a fresh PoseGraphOptimizer's offset is, so the first keyframe
 // after a Start causes no jump. No m_pgo access, hence no m_pgo_mutex: this
 // runs on the intake thread while a Start may be replacing m_pgo.
 void PGONode::sendIdentityTF(const builtin_interfaces::msg::Time & time)
@@ -820,7 +820,7 @@ void PGONode::publishMapCloud(builtin_interfaces::msg::Time & time)
   // ever mutates m_key_poses. Poses are copied (~200 B per keyframe);
   // body_cloud Ptrs are shared, which is safe because a keyframe's cloud is
   // never written after insertion (smoothAndUpdate rewrites poses only).
-  // This is also why the merge does NOT go through SimplePGO::getSubMap():
+  // This is also why the merge does NOT go through PoseGraphOptimizer::getSubMap():
   // that reads m_key_poses live and would race the next timer tick.
   std::vector<KeyPoseWithCloud> snapshot = m_pgo->keyPoses();
   // seq is taken here, on the timer thread under m_pgo_mutex -- the same
@@ -917,7 +917,7 @@ void PGONode::publishLoopMarkerDeleteAll()
 void PGONode::stopRunLocked(const builtin_interfaces::msg::Time & now)
 {
   // NOT for safety -- mergeAndPublishMapCloud works on a by-value snapshot
-  // and never touches m_pgo, so destroying SimplePGO under it was already
+  // and never touches m_pgo, so destroying PoseGraphOptimizer under it was already
   // fine (the keyframe clouds are refcounted). The join is here so an
   // in-flight merge cannot publish the OLD map after we publish the empty
   // one, which would undo the only thing telling consumers the map is gone.
@@ -927,12 +927,12 @@ void PGONode::stopRunLocked(const builtin_interfaces::msg::Time & now)
 
   // The constructor IS the reset: fresh ISAM2, empty values and graph,
   // identity offsets, and the three keyframe vectors empty by virtue of
-  // being a new object. Deliberately not a SimplePGO::reset() method --
+  // being a new object. Deliberately not a PoseGraphOptimizer::reset() method --
   // gtsam::ISAM2 has no clear, so such a method would be a second
   // definition of "empty" that has to stay in sync with this one. After a
   // save this is also what frees the keyframe clouds: hundreds of MB on a
   // long drive, all of it on disk by then.
-  m_pgo = std::make_shared<SimplePGO>(m_pgo_config);
+  m_pgo = std::make_shared<PoseGraphOptimizer>(m_pgo_config);
 
   {
     std::lock_guard<std::mutex> lock(m_state.message_mutex);

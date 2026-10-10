@@ -3,7 +3,7 @@
 
 // The ROS shell around the pose graph. The graph itself (keyframe selection,
 // radius-search loop detection with ICP verification, GTSAM iSAM2 smoothing)
-// is pgos/simple_pgo.*; this class owns the synchronised cloud+odom intake,
+// is pgos/pose_graph_optimizer.*; this class owns the synchronised cloud+odom intake,
 // the 50 ms timer that feeds it and broadcasts map -> local_frame, the
 // "map so far" merge worker and its file hand-off to the operator console's
 // backend, and the three services that bracket a mapping run: start_mapping
@@ -53,7 +53,7 @@
 #include "syncai_common/srv/start_mapping.hpp"
 #include "syncai_mapping/map_cleaner.hpp"
 #include "syncai_mapping/pgos/commons.h"
-#include "syncai_mapping/pgos/simple_pgo.h"
+#include "syncai_mapping/pgos/pose_graph_optimizer.h"
 #include "visualization_msgs/msg/marker.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
 
@@ -71,7 +71,7 @@ struct NodeConfig
   std::string map_frame = "map";
   std::string local_frame = "lidar";
   // The published "map so far" merge (see publishMapCloud). Node-level publish
-  // behaviour, not PGO math, so they live here rather than in Config.
+  // behaviour, not PGO math, so they live here rather than in PoseGraphOptimizerConfig.
   double map_cloud_resolution = 0.2;
   double map_cloud_pub_period = 3.0;
   // Where the merge is handed to the operator console's backend as a FILE
@@ -248,16 +248,16 @@ private:
     bool reset_lio, uint8_t required_phase, std::string & message, double & last_odom_time,
     uint32_t & dropped);
   // Everything that turns "a run" into "no run", for the caller that already
-  // holds m_pgo_mutex: join the merge worker, replace SimplePGO, empty the
+  // holds m_pgo_mutex: join the merge worker, replace PoseGraphOptimizer, empty the
   // buffer and the counters, publish the empty map (which clears /dev/shm)
   // and delete the loop markers. Does NOT touch phase -- the caller stores
   // IDLE (save) or MAPPING (start / reset) itself.
   void stopRunLocked(const builtin_interfaces::msg::Time & now);
 
   NodeConfig m_node_config;
-  Config m_pgo_config;
+  PoseGraphOptimizerConfig m_pgo_config;
   NodeState m_state;
-  std::shared_ptr<SimplePGO> m_pgo;
+  std::shared_ptr<PoseGraphOptimizer> m_pgo;
   rclcpp::TimerBase::SharedPtr m_timer;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr m_loop_marker_pub;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr m_map_cloud_pub;
