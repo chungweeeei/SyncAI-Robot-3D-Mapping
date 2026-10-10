@@ -1,0 +1,13 @@
+# Parameters for the syncai_robot_3d_mapping node.
+#
+# The key is a bare /** on purpose: rclrs only matches a params-file key that is exactly "/**" or
+# exactly the node's fully-qualified name, with NO wildcard expansion, so
+# /**/syncai_robot_3d_mapping silently matches nothing and every value falls back to its code
+# default. /** is safe because this file is only ever passed to this one node (see
+# launch/mapping.launch.py).
+/**:
+  ros__parameters:
+    # Frame the map is built in.
+    frame_id: "map"
+    # Heartbeat publish rate, in Hz.
+    heartbeat_rate: 1.0
