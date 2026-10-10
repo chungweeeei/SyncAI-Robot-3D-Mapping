@@ -290,7 +290,8 @@ or is killed leaves the raw map.
 | whole map | 1.2 M points removed |
 
 2 min 10 s and 1.0 GB peak on the Mac replay container (no octree is built:
-OctoMap is used only for its voxel keys and ray traversal). With both rules
+OctoMap is used only for its voxel keys and ray traversal, and no OctoMap file
+is produced; the clean's only outputs are `map.pcd` and the recipe). With both rules
 off the rewritten `map.pcd` matches pgo's point for point (0.1 mm, from
 `poses.txt`'s 6 significant digits).
 

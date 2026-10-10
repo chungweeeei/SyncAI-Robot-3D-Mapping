@@ -51,7 +51,8 @@ RUN git clone --branch ${GTSAM_VERSION} --depth 1 https://github.com/borglab/gts
 
 # Package dependencies installed after GTSAM, in their own layer so adding apt packages here
 # never invalidates the slow GTSAM build above:
-# - OctoMap for clean_map (the rosdep key `octomap`)
+# - OctoMap for clean_map (the rosdep key `octomap`), as a library only: voxel keys and ray
+#   traversal. No OctoMap map is built or written; the clean's output is map.pcd.
 # - nlohmann/json, header-only, for the map_cloud_file notice and map_clean.recipe.json (the
 #   rosdep key `nlohmann-json-dev`)
 RUN apt-get update && apt-get install -y --no-install-recommends \

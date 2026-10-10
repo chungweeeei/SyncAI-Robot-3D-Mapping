@@ -11,6 +11,9 @@ and PCL are far more mature there. Two executables:
   TF, and the `start_mapping` / `save_maps` / `reset_mapping` services plus `mapping_status`.
 - `clean_map`: the detached post-save job `pgo_node` spawns; it ray-casts the saved patches
   (OctoMap voxel keys, no tree) and rewrites `map.pcd` without people and one-off returns.
+  Its only outputs are `map.pcd` and `map_clean.recipe.json`. dev needs only the 3D `map.pcd`
+  (the 2D map is made from it downstream), so do not add an OctoMap export: OctoMap is used
+  purely as a library for voxel keys and ray traversal.
 
 `README.md` is the authoritative behaviour reference (the run lifecycle, threading, loop
 verification, cleaning `map.pcd`, gotchas). Read the relevant section before changing behaviour.
