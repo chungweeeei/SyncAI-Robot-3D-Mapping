@@ -62,14 +62,15 @@ namespace syncai_mapping
 
 struct NodeConfig
 {
-  // The two inputs and the LIO reset service live in syncai_pointlio's
-  // namespace, which a relative name from inside /<robot_id>/pgo cannot
-  // reach, so all three are absolute and the launch overrides them per
-  // robot_id. These are the bare-run fallbacks and must never carry one.
-  std::string cloud_topic = "/pointlio/body_cloud";
-  std::string odom_topic = "/pointlio/lio_odom";
+  // The two inputs, the frames and the LIO reset service. Fixed names, NOT
+  // parameters: loadParameters() derives them from this node's namespace
+  // (syncai_pointlio runs at /<robot_id>/pointlio, the sibling of
+  // /<robot_id>/pgo), so they always match pointlio.launch.py without the
+  // launch having to pass them.
+  std::string cloud_topic;
+  std::string odom_topic;
   std::string map_frame = "map";
-  std::string local_frame = "lidar";
+  std::string local_frame;
   // The published "map so far" merge (see publishMapCloud). Node-level publish
   // behaviour, not PGO math, so they live here rather than in PoseGraphOptimizerConfig.
   double map_cloud_resolution = 0.2;
@@ -80,12 +81,8 @@ struct NodeConfig
   // small for two merges of a large site). mapping.launch.py appends
   // /<robot_id> so two robots on one host never share a directory.
   std::string map_cloud_dir = "/dev/shm/syncai_pgo";
-  // pointlio's reset service. Absolute, and overridden per robot_id by
-  // mapping.launch.py for exactly the reason cloud_topic and odom_topic are:
-  // it names something in pointlio's namespace, which a relative name from
-  // inside /<robot_id>/pgo cannot reach. Keeping it a parameter is what stops
-  // this file from ever spelling a robot_id.
-  std::string lio_reset_service = "/pointlio/reset";
+  // pointlio's reset service, derived like cloud_topic / odom_topic above.
+  std::string lio_reset_service;
   // Come up MAPPING instead of IDLE (2026-10, when the idle state arrived).
   // The escape hatch for bag replays and for a backend without a Start
   // control: with it false -- the default, and what the mapping session

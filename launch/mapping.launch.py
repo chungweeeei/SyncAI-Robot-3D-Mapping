@@ -9,34 +9,27 @@
 # because a second, drifted copy of the pointlio Node had once passed a
 # `config_path` nobody read, so the LIO fell back to struct defaults and
 # subscribed to topics nothing published — no odom, no body_cloud, nothing for
-# pgo to optimise. Do not grow a pointlio Node definition here: the four
-# absolute /<robot_id>/pointlio/... names and the <robot_id>/pointlio_odom
-# frame injected below are the only coupling with pointlio.launch.py, and they
-# have to match it.
+# pgo to optimise. Do not grow a pointlio Node definition here: the only
+# coupling with pointlio.launch.py is the namespace below. pgo_node derives
+# its inputs (/<robot_id>/pointlio/{body_cloud_dense,lio_odom}), its LIO reset
+# client (/<robot_id>/pointlio/reset) and its local frame
+# (<robot_id>/pointlio_odom) from running at /<robot_id>/pgo, so those names
+# are not parameters and this launch does not pass them.
 #
 # robot_id is read from the system config INI at launch time (the workspace-
 # wide convention) and is used as the namespace:
 #   /<robot_id>/pgo/...   (start_mapping, save_maps, reset_mapping, map_cloud,
 #                          map_cloud_file, mapping_status, loop_markers)
+# The namespace is load-bearing: a pgo_node run anywhere other than
+# /<robot_id>/pgo looks for pointlio in the wrong place.
 #
 # pgo_node's settings are plain ROS parameters (params/mapping_params.yaml,
 # keyed by the `/**/pgo_node:` wildcard so the file works at any namespace),
 # so this launch passes the installed file straight through and layers only
-# the robot_id-dependent values on top. It used to instead rewrite the whole
-# YAML into /tmp/syncai_pgo/pgo_<robot_id>.yaml, because the node parsed that
-# YAML itself with yaml-cpp and knew nothing about ROS parameters.
-#
-# The robot_id-dependent values are parameter overrides, not remappings: the
-# node builds its message_filters subscribers and its ResetLIO client from
-# parameter values (they are absolute names into pointlio's namespace, which a
-# relative name from /<robot_id>/pgo could not reach), and the frame is a
-# parameter because TF frame ids are not namespaced by ROS.
-#
-# Frames: local_frame must match pointlio's world_frame
-# (<robot_id>/pointlio_odom) — pgo broadcasts map -> local_frame and, unlike
-# the localizer, does NOT adopt that frame from the incoming odom messages, so
-# a mismatch here means the correction lands on a frame nobody looks up.
-# map_frame stays plain `map`.
+# map_cloud_dir (robot_id-dependent) and start_on_launch on top. It used to
+# instead rewrite the whole YAML into /tmp/syncai_pgo/pgo_<robot_id>.yaml,
+# because the node parsed that YAML itself with yaml-cpp and knew nothing
+# about ROS parameters.
 
 import configparser
 import os
@@ -96,25 +89,9 @@ def launch_setup(context, *args, **kwargs):
     pkg_mapping = FindPackageShare("syncai_mapping").find("syncai_mapping")
     params_file = os.path.join(pkg_mapping, "params", "mapping_params.yaml")
 
-    # The five robot_id-dependent values, layered AFTER the params file so
-    # they win (later entries override earlier ones). These are the contract
-    # with syncai_pointlio/launch/pointlio.launch.py, which is what actually
-    # starts the front end.
+    # Layered AFTER the params file so they win (later entries override
+    # earlier ones).
     overrides = {
-        # pointlio's outputs live in its own namespace, not pgo's, so relative
-        # names cannot reach them. body_cloud_dense, not body_cloud: the same
-        # deskewed scan at 3x the points (pointlio's dense_filter_num), which
-        # is what puts enough floor and wall into each keyframe for clean_map
-        # to tell people from structure; nothing else subscribes to it.
-        "cloud_topic": f"/{robot_id}/pointlio/body_cloud_dense",
-        "odom_topic": f"/{robot_id}/pointlio/lio_odom",
-        # pointlio's world_frame override, which pgo's map -> local_frame TF
-        # has to correct; see the header.
-        "local_frame": f"{robot_id}/pointlio_odom",
-        # pgo_node's client for the LIO reset, which reset_mapping drives.
-        # Same reason as the two topics: the service lives in pointlio's
-        # namespace.
-        "lio_reset_service": f"/{robot_id}/pointlio/reset",
         # Per-robot subdirectory of the shared tmpfs the merged map cloud is
         # handed to the backend through. Two robots on one host must not
         # prune each other's files.

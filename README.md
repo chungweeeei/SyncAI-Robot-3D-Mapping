@@ -87,16 +87,19 @@ MIT); `pgo_node.*` is the ROS shell.
 
 | Input | Kind | Source | Used for |
 |---|---|---|---|
-| `cloud_topic` = `/<robot_id>/pointlio/body_cloud_dense` | `sensor_msgs/PointCloud2`, depth 10 | `syncai_pointlio` | The keyframe's body-frame scan: deskewed, 3× `body_cloud`'s points (2026-10; it was `body_cloud` before). Only x / y / z / intensity are read. The density is what lets `clean_map` tell people from structure. |
-| `odom_topic` = `/<robot_id>/pointlio/lio_odom` | `nav_msgs/Odometry`, depth 10 | `syncai_pointlio` | The keyframe's pose in `local_frame` |
+| `/<robot_id>/pointlio/body_cloud_dense` | `sensor_msgs/PointCloud2`, depth 10 | `syncai_pointlio` | The keyframe's body-frame scan: deskewed, 3× `body_cloud`'s points (2026-10; it was `body_cloud` before). Only x / y / z / intensity are read. The density is what lets `clean_map` tell people from structure. |
+| `/<robot_id>/pointlio/lio_odom` | `nav_msgs/Odometry`, depth 10 | `syncai_pointlio` | The keyframe's pose in `local_frame` |
 
 The two are joined by a `message_filters` `ApproximateTime` synchroniser
-(queue 10, age penalty 0.1) into one cloud+pose pair per lidar frame. They are
-**absolute names set as parameters**, not remappings: they live in pointlio's
-namespace, which a relative name from inside `/<robot_id>/pgo` cannot reach,
-so the launch overrides both per robot_id. The node logs the resolved names at
-startup, so a bare run (subscribing to `/pointlio/…`, which nothing publishes)
-shows up in the log rather than as silence.
+(queue 10, age penalty 0.1) into one cloud+pose pair per lidar frame. The
+names are **fixed, not parameters**: the node derives them, the LIO reset
+client `/<robot_id>/pointlio/reset` and its `local_frame`
+`<robot_id>/pointlio_odom` from its own namespace, because pointlio runs at
+`/<robot_id>/pointlio`, the sibling of `/<robot_id>/pgo`. They are absolute,
+since a relative name from inside `/<robot_id>/pgo` cannot reach pointlio's
+namespace. The node logs the resolved names at startup, so a bare run
+(subscribing to `/pointlio/…`, which nothing publishes) shows up in the log
+rather than as silence.
 
 The synchroniser only buffers; a 50 ms timer takes the **oldest** pair and
 drains the rest, so under load the graph falls behind by whole frames rather
@@ -409,15 +412,12 @@ namespace. Every key is a `declare_parameter` whose default repeats the struct
 default, so a missing key degrades to the code default instead of throwing —
 a change from the yaml-cpp loader, where most keys were required. Read once:
 the values are copied into the graph at construction and on every reset, so
-`ros2 param set` afterwards changes nothing.
+`ros2 param set` afterwards changes nothing. The inputs, the LIO reset service
+and the frames (`map`, `<robot_id>/pointlio_odom`) are not parameters; see
+Inputs.
 
 | Parameter | Default (YAML) | Launch value | Notes |
 |---|---|---|---|
-| `cloud_topic` | `/pointlio/body_cloud_dense` | `/<robot_id>/pointlio/body_cloud_dense` | absolute; see Inputs |
-| `odom_topic` | `/pointlio/lio_odom` | `/<robot_id>/pointlio/lio_odom` | |
-| `lio_reset_service` | `/pointlio/reset` | `/<robot_id>/pointlio/reset` | the `ResetLIO` client |
-| `map_frame` | `map` | | never prefixed |
-| `local_frame` | `lio_odom` | `<robot_id>/pointlio_odom` | must equal pointlio's `world_frame` |
 | `map_cloud_dir` | `/dev/shm/syncai_pgo` | `<map_cloud_dir arg>/<robot_id>` | the launch's `map_cloud_dir:=` argument is the base |
 | `key_pose_delta_deg` / `key_pose_delta_trans` | `10.0` / `0.5` | | keyframe every 10° or 0.5 m. **Write `10.0`**: a bare `10` is an int64 override and the node dies at startup with `InvalidParameterTypeException`. |
 | `loop_search_radius` | `1.0` | | m, over past keyframes |
@@ -522,7 +522,6 @@ Checking it:
 
 ```bash
 ros2 node info /<robot_id>/pgo/pgo_node                # subs /<id>/pointlio/{body_cloud,lio_odom}; srvs start_mapping save_maps reset_mapping
-ros2 param get /<robot_id>/pgo/pgo_node local_frame    # <robot_id>/pointlio_odom
 ros2 param get /<robot_id>/pgo/pgo_node loop_score_tresh   # 0.15 → the params file was found
 ros2 service type /<robot_id>/pgo/save_maps            # syncai_common/srv/SaveMaps
 ros2 topic echo /<robot_id>/pgo/mapping_status --qos-durability transient_local --qos-reliability reliable   # state 0 = idle, 1 = mapping
@@ -533,7 +532,7 @@ ls /dev/shm/syncai_pgo/<robot_id>                      # map_cloud_<seq>.pcd, ne
 
 | Log line | Meaning |
 |---|---|
-| `[PGONode] inputs: /robot01/pointlio/body_cloud + … \| TF map -> robot01/pointlio_odom \| …` | The overrides landed. Unprefixed names mean a bare run, or overrides passed before the params file. |
+| `[PGONode] inputs: /robot01/pointlio/body_cloud_dense + … \| TF map -> robot01/pointlio_odom \| …` | The names derived from the namespace. Unprefixed names mean a bare run outside `/<robot_id>/pgo`. |
 | `[PGONode] map_cloud merges are handed off as PCD files under …` | The hand-off directory is writable |
 | `[PGONode] loop verification: gicp, max corr dist 1.00 m, fitness gate 0.150, planar correction on, …` | The loop settings that are actually in force (see "Loop verification") |
 | `[PGONode][loop] target 44 -> source 252 \| fitness 0.0995 \| ICP moves source by (0.065, -0.024, 0.000) m, rot 0.21 deg \| z before: …` | A loop was accepted: what the registration asked for (world-frame displacement of the source keyframe and rotation) and both keyframes' z before the graph update. A z component that is not 0.000 with planar correction on, or a rotation of degrees rather than tenths, is the failure this line exists to catch |
@@ -567,8 +566,10 @@ ls /dev/shm/syncai_pgo/<robot_id>                      # map_cloud_<seq>.pcd, ne
   `syncai_common syncai_pointlio syncai_mapping` together, and clear the stale
   `install/pgo` / `install/interface` from before the port so the old headers
   and `pgo_launch.py` cannot be found by mistake.
-- **`local_frame` must equal pointlio's `world_frame`.** Both are launch
-  overrides now, in two launch files; if they drift, `map → local_frame` is
+- **`local_frame` must equal pointlio's `world_frame`.** pgo derives it as
+  `<robot_id>/pointlio_odom` from its namespace, and pointlio.launch.py sets
+  `world_frame` to the same; if pointlio's ever changes, update the
+  derivation in `PGONode::loadParameters()`, or `map → local_frame` is
   broadcast onto a frame nobody looks up and the console's map view floats.
 - **Types in the params file.** Every tuning value is a double except
   `loop_submap_half_range`; a bare integer for a double key, or a float for

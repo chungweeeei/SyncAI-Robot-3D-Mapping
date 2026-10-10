@@ -35,6 +35,18 @@ namespace syncai_mapping
 
 using namespace std::chrono_literals;
 
+namespace
+{
+
+// "/<robot_id>/pgo" -> "/<robot_id>"; "/pgo" or "/" (a bare run) -> "".
+std::string parentNamespace(const std::string & ns)
+{
+  const auto slash = ns.find_last_of('/');
+  return (slash == std::string::npos || slash == 0) ? std::string() : ns.substr(0, slash);
+}
+
+}  // namespace
+
 PGONode::PGONode() : Node("pgo_node")
 {
   RCLCPP_INFO(this->get_logger(), "PGO node started");
@@ -370,9 +382,8 @@ void PGONode::writeAndAnnounceMapCloud(
 // config_path, a launch-level override could not touch a single value) and
 // forced the launch file to rewrite the whole YAML into
 // /tmp/syncai_pgo/pgo_<robot_id>.yaml just to inject the robot_id prefix.
-// Declaring them properly is what lets the launch layer the five
-// robot_id-dependent values on top of the shared file, the same way
-// syncai_pointlio's launch layers its two frame names.
+// Declaring them properly is what lets the launch layer the robot_id-dependent
+// values (map_cloud_dir, start_on_launch) on top of the shared file.
 //
 // The defaults repeat the struct defaults (NodeConfig here, PoseGraphOptimizerConfig in
 // pgos/pose_graph_optimizer.h), so a missing key degrades to running the node bare
@@ -388,20 +399,26 @@ void PGONode::writeAndAnnounceMapCloud(
 // at construction, so `ros2 param set` after startup changes nothing.
 void PGONode::loadParameters()
 {
-  // Inputs, frames and the LIO reset service. Absolute topic / service names
-  // on purpose: they live in pointlio's namespace, which a relative name from
-  // inside /<robot_id>/pgo cannot reach, so the launch overrides all of them
-  // per robot_id. The fallbacks here must never contain a robot_id.
-  m_node_config.cloud_topic = this->declare_parameter("cloud_topic", m_node_config.cloud_topic);
-  m_node_config.odom_topic = this->declare_parameter("odom_topic", m_node_config.odom_topic);
-  m_node_config.map_frame = this->declare_parameter("map_frame", m_node_config.map_frame);
-  // Must equal syncai_pointlio's world_frame override (<robot_id>/pointlio_odom):
-  // this node broadcasts map -> local_frame and, unlike the localizer, does NOT
+  // Inputs, frames and the LIO reset service: fixed names, not parameters
+  // (they never change). syncai_pointlio runs at /<robot_id>/pointlio, the
+  // sibling of this node's /<robot_id>/pgo, so everything is derived from the
+  // parent of this node's namespace -- empty for a bare run. Absolute names,
+  // since a relative name from inside /<robot_id>/pgo cannot reach pointlio's
+  // namespace. body_cloud_dense, not body_cloud: the same deskewed scan at 3x
+  // the points, which is what puts enough floor and wall into each keyframe
+  // for clean_map to tell people from structure.
+  const std::string robot_ns = parentNamespace(this->get_namespace());
+  m_node_config.cloud_topic = robot_ns + "/pointlio/body_cloud_dense";
+  m_node_config.odom_topic = robot_ns + "/pointlio/lio_odom";
+  m_node_config.lio_reset_service = robot_ns + "/pointlio/reset";
+  // Must equal syncai_pointlio's world_frame (<robot_id>/pointlio_odom): this
+  // node broadcasts map -> local_frame and, unlike the localizer, does NOT
   // adopt the frame from the incoming odometry header, so a mismatch lands
-  // the correction on a frame nobody looks up.
-  m_node_config.local_frame = this->declare_parameter("local_frame", m_node_config.local_frame);
-  m_node_config.lio_reset_service =
-    this->declare_parameter("lio_reset_service", m_node_config.lio_reset_service);
+  // the correction on a frame nobody looks up. TF frame ids are not
+  // namespaced by ROS, so the robot_id prefix is spelt out without the
+  // leading slash.
+  m_node_config.local_frame =
+    robot_ns.empty() ? "pointlio_odom" : robot_ns.substr(1) + "/pointlio_odom";
   // The launch passes the per-robot subdirectory (<base>/<robot_id>) so two
   // robots on one host never prune each other's files.
   m_node_config.map_cloud_dir =
@@ -505,9 +522,9 @@ void PGONode::loadParameters()
     mc.dynamic_miss_ratio, mc.dynamic_min_miss, mc.clip_below_floor ? "on" : "off",
     m_node_config.map_clean_nice);
 
-  // The five values the launch is expected to have overridden. A value here
-  // without a robot_id prefix means the node was started bare, or the
-  // overrides were passed before the params file (later entries win).
+  // The names derived from the namespace, and the launch's overrides. A value
+  // here without a robot_id prefix means the node was started bare (outside
+  // /<robot_id>/pgo), or the overrides were passed before the params file.
   RCLCPP_INFO(
     this->get_logger(),
     "[PGONode] inputs: %s + %s | TF %s -> %s | LIO reset: %s | map_cloud_dir: %s | "

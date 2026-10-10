@@ -9,14 +9,11 @@
 # through a `config_path` parameter, which is why the launch used to rewrite
 # a copy of it under /tmp/syncai_pgo/ per robot_id; the values are unchanged.
 #
-# Five keys are robot_id-dependent and are OVERRIDDEN by the launch — the
-# values here are only the fallbacks for running the node bare, and must never
-# contain a robot_id:
-#   cloud_topic, odom_topic, lio_reset_service   -> /<robot_id>/pointlio/...
-#   local_frame                                  -> <robot_id>/pointlio_odom
-#   map_cloud_dir                                -> <map_cloud_dir>/<robot_id>
-# They are absolute names on purpose: all of them point into pointlio's
-# namespace, which a relative name from inside /<robot_id>/pgo cannot reach.
+# The inputs, frames and LIO reset service are not here: pgo_node derives
+# them from its namespace (/<robot_id>/pgo -> /<robot_id>/pointlio/...,
+# <robot_id>/pointlio_odom, map). map_cloud_dir is the one robot_id-dependent
+# key: the launch overrides it with <map_cloud_dir>/<robot_id>, so the value
+# here is only the fallback for running the node bare.
 #
 # Numeric types matter. The node declares every tuning value below as a double
 # EXCEPT loop_submap_half_range (an int): a bare `10` for a double key is an
@@ -29,18 +26,6 @@
 # changes nothing.
 /**/pgo_node:
   ros__parameters:
-    cloud_topic: /pointlio/body_cloud_dense
-    odom_topic: /pointlio/lio_odom
-    # pointlio's reset service, driven by pgo/reset_mapping.
-    lio_reset_service: /pointlio/reset
-    map_frame: map
-    # LIO world frame that pgo's map->local_frame TF should correct. Must
-    # match syncai_pointlio's world_frame override — pgo does NOT adopt the
-    # frame from the incoming odom header (the localizer does), so a mismatch
-    # lands the correction on a frame nobody looks up. Upstream's value was
-    # "lidar"; this fallback is the pre-prefix name.
-    local_frame: lio_odom
-
     # Keyframe selection: a new keyframe every 10 deg or 0.5 m of travel.
     key_pose_delta_deg: 10.0
     key_pose_delta_trans: 0.5
