@@ -3,8 +3,8 @@ FROM ros:humble-ros-base
 ARG ROS_DISTRO
 ENV DEBIAN_FRONTEND=noninteractive
 
-# - libboost-all-dev / libtbb-dev / libeigen3-dev: GTSAM / Sophus builds and headers (same set as
-#   the SyncAI-Robot-Workspace image, so they are built against the same libraries)
+# - libboost-all-dev / libtbb-dev / libeigen3-dev: GTSAM's build and headers (same set as the
+#   SyncAI-Robot-Workspace image, so it is built against the same libraries)
 # - ros-*-pcl-conversions / pcl-ros: PCL (libpcl-dev) plus the PointCloud2 <-> pcl bridge
 # - rmw-cyclonedds-cpp: the RMW devcontainer.json selects via RMW_IMPLEMENTATION; without it rcl
 #   refuses to start
@@ -48,21 +48,6 @@ RUN git clone --branch ${GTSAM_VERSION} --depth 1 https://github.com/borglab/gts
     && make -j"$(nproc)" && make install \
     && ldconfig \
     && rm -rf /tmp/gtsam
-
-# Sophus 1.22.10 (hba_node): header-only, source-built like SyncAI-Robot-Workspace's image.
-# SOPHUS_USE_BASIC_LOGGING=ON drops the fmt dependency (matches the compile definition hba_node
-# sets in CMakeLists.txt).
-ARG SOPHUS_VERSION=1.22.10
-RUN git clone --branch ${SOPHUS_VERSION} --depth 1 https://github.com/strasdat/Sophus.git \
-        /tmp/Sophus \
-    && cd /tmp/Sophus && mkdir build && cd build \
-    && cmake .. \
-        -DSOPHUS_USE_BASIC_LOGGING=ON \
-        -DBUILD_SOPHUS_TESTS=OFF \
-        -DBUILD_SOPHUS_EXAMPLES=OFF \
-    && make -j"$(nproc)" && make install \
-    && ldconfig \
-    && rm -rf /tmp/Sophus
 
 # OctoMap for build_octomap (the rosdep key `octomap`). Its own layer below GTSAM so adding apt
 # packages here never invalidates the slow GTSAM build above.

@@ -1,6 +1,6 @@
 # CI for syncai_mapping (the SyncAI-Robot-3D-Mapping repo).
 #
-# The package can only be compiled against ROS 2 Humble plus source-built GTSAM / Sophus, so the `check`
+# The package can only be compiled against ROS 2 Humble plus a source-built GTSAM, so the `check`
 # job builds the repo's own Dev Container image (.devcontainer/Dockerfile) with buildx and runs
 # .github/scripts/ci.sh inside it. The image layers are kept in the GitHub Actions cache: the first
 # run compiles GTSAM from source (slow), later runs reuse it until the Dockerfile changes or the

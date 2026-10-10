@@ -1,13 +1,13 @@
 # CLAUDE.md
 
 The ROS 2 package `syncai_mapping` (C++17, `rclcpp`), the SyncAI mapping back end, moved here from
-`~/Projects/SyncAI-Robot-Workspace/src/syncai_mapping` (source commit `c327059` there). C++ rather
-than rclrs because GTSAM and PCL are far more mature there. Three executables:
+`~/Projects/SyncAI-Robot-Workspace/src/syncai_mapping` (source commit `c327059` there), with the
+offline `hba_node` (HBA / BALM refinement) left behind: only the pose graph lives here. C++ rather
+than rclrs because GTSAM and PCL are far more mature there. Two executables:
 
 - `pgo_node`: pose graph over `syncai_pointlio`'s odometry and dense body clouds. Keyframes, loop
   closure (small_gicp + `PlanarLoopFactor`), GTSAM iSAM2, the `map -> <robot_id>/pointlio_odom`
   TF, and the `start_mapping` / `save_maps` / `reset_mapping` services plus `mapping_status`.
-- `hba_node`: offline hierarchical bundle adjustment (BALM) over a save's `patches/`, run by hand.
 - `build_octomap`: the detached post-save OctoMap build that `pgo_node` spawns.
 
 `README.md` is the authoritative behaviour reference (the run lifecycle, threading, loop
@@ -44,10 +44,10 @@ docker exec syncai-robot-3d-mapping bash -lc 'cd /workspace && colcon test --pac
 
 ## Dependencies
 
-- **GTSAM 4.2.0 and Sophus 1.22.10 are source-built into `/usr/local`** by the Dockerfile with the
-  same flags as the Workspace image (GTSAM: system Eigen, no march-native, TBB on, shared). Keep
-  them in step with the Workspace: a GTSAM built with its bundled Eigen or `-march=native` causes
-  Eigen-alignment crashes when mixed with PCL. Neither has a `<depend>` in `package.xml` on purpose.
+- **GTSAM 4.2.0 is source-built into `/usr/local`** by the Dockerfile with the same flags as the
+  Workspace image (system Eigen, no march-native, TBB on, shared). Keep them in step with the
+  Workspace: a GTSAM built with its bundled Eigen or `-march=native` causes Eigen-alignment crashes
+  when mixed with PCL. It has no `<depend>` in `package.xml` on purpose.
 - PCL, Eigen and OctoMap come from apt (`ros-humble-pcl-ros`, `libeigen3-dev`,
   `ros-humble-octomap`).
 - `syncai_common` and `small_gicp` are colcon packages from `dependencies.repos`; keep those pins in
@@ -64,6 +64,6 @@ bags or testing, `export ROS_DOMAIN_ID=77` so nothing reaches a real robot's gra
 - Everything is written in English (code, comments, logs, docs). Log messages carry a `[Module]`
   prefix (e.g. `[PGONode]`, `[saveMapsCB]`).
 - Formatting follows `.clang-format` (ROS 2 / Google based, copied from SyncAI-Robot-Workspace).
-- `pgos/` and `hba/` are upstream-derived (FASTLIO2_ROS2 lineage) and MIT-licensed (`LICENSE`).
+- `pgos/` is upstream-derived (FASTLIO2_ROS2 lineage) and MIT-licensed (`LICENSE`).
 - Commits use Conventional Commits (`.github/prompt/copilot-commit-message-instructions.md`), in
   English.
