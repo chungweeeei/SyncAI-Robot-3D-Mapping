@@ -447,10 +447,8 @@ void PGONode::loadParameters()
     this->declare_parameter("loop_time_tresh", m_pgo_config.loop_time_tresh);
   m_pgo_config.loop_score_tresh =
     this->declare_parameter("loop_score_tresh", m_pgo_config.loop_score_tresh);
-  m_pgo_config.loop_icp_max_corr_dist =
-    this->declare_parameter("loop_icp_max_corr_dist", m_pgo_config.loop_icp_max_corr_dist);
-  m_pgo_config.loop_registration =
-    this->declare_parameter("loop_registration", m_pgo_config.loop_registration);
+  m_pgo_config.loop_max_corr_dist =
+    this->declare_parameter("loop_max_corr_dist", m_pgo_config.loop_max_corr_dist);
   m_pgo_config.loop_gicp_num_threads =
     this->declare_parameter("loop_gicp_num_threads", m_pgo_config.loop_gicp_num_threads);
   m_pgo_config.loop_gicp_num_neighbors =
@@ -465,20 +463,14 @@ void PGONode::loadParameters()
     this->declare_parameter("loop_noise_xy_sigma_m", m_pgo_config.loop_noise_xy_sigma_m);
   m_pgo_config.keyframe_tilt_sigma_deg =
     this->declare_parameter("keyframe_tilt_sigma_deg", m_pgo_config.keyframe_tilt_sigma_deg);
-  if (m_pgo_config.loop_registration != "gicp" && m_pgo_config.loop_registration != "icp") {
-    RCLCPP_WARN(
-      this->get_logger(), "[PGONode] loop_registration '%s' unknown, using 'gicp'",
-      m_pgo_config.loop_registration.c_str());
-    m_pgo_config.loop_registration = "gicp";
-  }
   RCLCPP_INFO(
     this->get_logger(),
-    "[PGONode] loop verification: %s, max corr dist %.2f m, fitness gate %.3f, planar "
+    "[PGONode] loop verification: gicp, max corr dist %.2f m, fitness gate %.3f, planar "
     "correction %s, roll/pitch/z variance %.1e, planar xy sigma %.3f m%s, planar yaw sigma "
     "%.2f deg%s, keyframe tilt sigma %.2f deg%s",
-    m_pgo_config.loop_registration.c_str(), m_pgo_config.loop_icp_max_corr_dist,
-    m_pgo_config.loop_score_tresh, m_pgo_config.loop_planar_correction ? "on" : "off",
-    m_pgo_config.loop_noise_var_roll_pitch_z, m_pgo_config.loop_noise_xy_sigma_m,
+    m_pgo_config.loop_max_corr_dist, m_pgo_config.loop_score_tresh,
+    m_pgo_config.loop_planar_correction ? "on" : "off", m_pgo_config.loop_noise_var_roll_pitch_z,
+    m_pgo_config.loop_noise_xy_sigma_m,
     m_pgo_config.loop_noise_xy_sigma_m > 0.0 ? "" : " (<= 0: variance = fitness)",
     m_pgo_config.loop_noise_yaw_sigma_deg,
     m_pgo_config.loop_noise_yaw_sigma_deg > 0.0 ? "" : " (<= 0: variance = fitness)",
@@ -744,8 +736,8 @@ void PGONode::timerCB()
   m_pgo->searchForLoopPairs();
 
   // One line per accepted loop, BEFORE the graph consumes it. This is the only
-  // record of what a closure asked for: the ICP fitness that passed
-  // loop_score_tresh, and the world-frame transform ICP applied to the current
+  // record of what a closure asked for: the GICP fitness that passed
+  // loop_score_tresh, and the world-frame transform GICP applied to the current
   // keyframe, split into translation (z separately, because a loop that lifts
   // the robot is the failure that has actually happened -- see the 2026-10
   // dp1f_1002 replay, where seven corridor loops with |dt| < 0.2 m each added
@@ -759,13 +751,13 @@ void PGONode::timerCB()
     const KeyPoseWithCloud & tgt = m_pgo->keyPoses()[lp.target_id];
     const KeyPoseWithCloud & src = m_pgo->keyPoses()[lp.source_id];
     src_z_before.push_back(src.t_global.z());
-    const double rot_deg = Eigen::AngleAxisd(lp.icp_r).angle() * 180.0 / M_PI;
-    // Where ICP wants the source keyframe, not the transform's raw translation:
+    const double rot_deg = Eigen::AngleAxisd(lp.gicp_r).angle() * 180.0 / M_PI;
+    // Where GICP wants the source keyframe, not the transform's raw translation:
     // with a rotation about the world origin, t alone is meaningless 20 m out.
-    const V3D moved = lp.icp_r * src.t_global + lp.icp_t - src.t_global;
+    const V3D moved = lp.gicp_r * src.t_global + lp.gicp_t - src.t_global;
     RCLCPP_INFO(
       this->get_logger(),
-      "[PGONode][loop] target %zu -> source %zu | fitness %.4f | ICP moves source by "
+      "[PGONode][loop] target %zu -> source %zu | fitness %.4f | GICP moves source by "
       "(%.3f, %.3f, %.3f) m, rot %.2f deg | z before: target %.3f source %.3f (source-target "
       "%+.3f)",
       lp.target_id, lp.source_id, lp.score, moved.x(), moved.y(), moved.z(), rot_deg,

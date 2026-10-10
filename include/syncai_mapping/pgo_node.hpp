@@ -2,7 +2,7 @@
 #define SYNCAI_MAPPING__PGO_NODE_HPP_
 
 // The ROS shell around the pose graph. The graph itself (keyframe selection,
-// radius-search loop detection with ICP verification, GTSAM iSAM2 smoothing)
+// radius-search loop detection with GICP verification, GTSAM iSAM2 smoothing)
 // is pgos/pose_graph_optimizer.*; this class owns the synchronised cloud+odom intake,
 // the 50 ms timer that feeds it and broadcasts map -> local_frame, the
 // "map so far" merge worker and its file hand-off to the operator console's

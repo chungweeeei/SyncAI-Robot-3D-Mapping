@@ -18,7 +18,8 @@ verification, cleaning `map.pcd`, gotchas). Read the relevant section before cha
 **The external interface is a cross-repo contract**: the package name `syncai_mapping`, executable
 names, node names / namespaces, topics, services (typed by `syncai_common`), parameters and the
 `/dev/shm/syncai_pgo/<robot_id>` hand-off are used by SyncAI-Robot-Workspace's session specs and
-by the backend. Do not rename any of them casually.
+by the backend. Do not rename any of them casually. Every deliberate deviation from the
+Workspace copy goes in README's "Differences from the Workspace copy", which must stay complete.
 
 **The repo root is the package itself** (`package.xml` and `CMakeLists.txt` are at the root), meant
 to be vcs-imported into the Workspace as `src/syncai_mapping`. `.devcontainer/` and

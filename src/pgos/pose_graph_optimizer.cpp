@@ -11,12 +11,6 @@ PoseGraphOptimizer::PoseGraphOptimizer(const PoseGraphOptimizerConfig & config) 
   m_r_offset.setIdentity();
   m_t_offset.setZero();
 
-  m_icp.setMaximumIterations(50);
-  m_icp.setMaxCorrespondenceDistance(m_config.loop_icp_max_corr_dist);
-  m_icp.setTransformationEpsilon(1e-6);
-  m_icp.setEuclideanFitnessEpsilon(1e-6);
-  m_icp.setRANSACIterations(0);
-
   // Same settings as syncai_localizer's refine stage, which is the other
   // small_gicp user in the workspace. setNumThreads() has to come before the
   // first setInputTarget() (the kd-tree builder reads it).
@@ -24,7 +18,7 @@ PoseGraphOptimizer::PoseGraphOptimizer(const PoseGraphOptimizerConfig & config) 
   m_gicp.setCorrespondenceRandomness(m_config.loop_gicp_num_neighbors);
   m_gicp.setRegistrationType("GICP");
   m_gicp.setMaximumIterations(50);
-  m_gicp.setMaxCorrespondenceDistance(m_config.loop_icp_max_corr_dist);
+  m_gicp.setMaxCorrespondenceDistance(m_config.loop_max_corr_dist);
   m_gicp.setTransformationEpsilon(1e-6);
 }
 
@@ -32,15 +26,6 @@ bool PoseGraphOptimizer::alignLoop(
   const CloudType::Ptr & source, const CloudType::Ptr & target, M4F & transform, double & fitness)
 {
   CloudType::Ptr aligned(new CloudType);
-  if (m_config.loop_registration == "icp") {
-    m_icp.setInputSource(source);
-    m_icp.setInputTarget(target);
-    m_icp.align(*aligned);
-    if (!m_icp.hasConverged()) return false;
-    transform = m_icp.getFinalTransformation();
-    fitness = m_icp.getFitnessScore();
-    return true;
-  }
   m_gicp.setInputSource(source);
   m_gicp.setInputTarget(target);
   m_gicp.align(*aligned);
@@ -218,7 +203,7 @@ void PoseGraphOptimizer::searchForLoopPairs()
 
   if (loop_idx == -1) return;
 
-  /** Point-cloud verification: align with ICP and derive the loop-closure edge.
+  /** Point-cloud verification: align with GICP and derive the loop-closure edge.
     * So far we only know "close in space, far apart in time", which cannot be trusted yet (two
     * different corridors can happen to be close in position too).
     * Target side: the point clouds of the 5 keyframes on each side of the old keyframe (11 in
@@ -259,8 +244,8 @@ void PoseGraphOptimizer::searchForLoopPairs()
   one_pair.source_id = cur_idx;
   one_pair.target_id = loop_idx;
   one_pair.score = fitness;
-  one_pair.icp_r = loop_transform.block<3, 3>(0, 0).cast<double>();
-  one_pair.icp_t = loop_transform.block<3, 1>(0, 3).cast<double>();
+  one_pair.gicp_r = loop_transform.block<3, 3>(0, 0).cast<double>();
+  one_pair.gicp_t = loop_transform.block<3, 1>(0, 3).cast<double>();
 
   // First apply the correction to the current frame's global pose, giving the corrected current
   // pose

@@ -5,9 +5,30 @@ here from `SyncAI-Robot-Workspace`'s `feat/mapping-dynamic-removal` branch (`src
 plus a Docker environment for developing it on its own.
 
 **This repo is itself a single colcon package** (`package.xml` / `CMakeLists.txt` at the root). The
-package name, executables, topics, services and parameters are unchanged from the Workspace copy,
-so the Workspace can pull this repo with vcstool as `src/syncai_mapping`, the same way it pulls
-SyncAI-Robot-State.
+package name, executables, node names, topics and services are unchanged from the Workspace copy, so
+the Workspace can pull this repo with vcstool as `src/syncai_mapping`, the same way it pulls
+SyncAI-Robot-State. The parameters are not quite unchanged; see the next section.
+
+## Differences from the Workspace copy
+
+Every place this repo knowingly deviates from `src/syncai_mapping` in SyncAI-Robot-Workspace. Keep
+this list complete: it is the checklist for switching the Workspace over to this repo, and the
+Workspace's in-tree copy (with its own params file) has to go at the same time.
+
+- **`cloud_topic`, `odom_topic`, `lio_reset_service`, `local_frame` and `map_frame` are no longer
+  parameters.** `pgo_node` derives `/<robot_id>/pointlio/{body_cloud_dense,lio_odom,reset}` and
+  `<robot_id>/pointlio_odom` from running at `/<robot_id>/pgo`, and `map_frame` is always `map`.
+  `mapping.launch.py` no longer passes them, and the node must run at `/<robot_id>/pgo`. Setting
+  them in a params file or a launch override has no effect.
+- **`loop_registration` is gone**: loops are always verified with GICP; the fork's PCL ICP backend
+  was removed. A `loop_registration` key is ignored.
+- **`loop_icp_max_corr_dist` is renamed `loop_max_corr_dist`.** A params file that still sets the
+  old key is silently ignored and the node uses the default, 1.0 m; rename the key.
+- The accepted-loop log line reads `GICP moves source by` (was `ICP moves source by`); anything
+  that greps the log for it needs the new text.
+- Internal only, no effect on the ROS interface: `SimplePGO` is `PoseGraphOptimizer`
+  (`pgos/pose_graph_optimizer.*`), its `Config` is `PoseGraphOptimizerConfig`, and
+  `src/pgo_main.cpp` is `src/main.cpp`.
 
 ## Development environment
 
@@ -422,9 +443,8 @@ Inputs.
 | `key_pose_delta_deg` / `key_pose_delta_trans` | `10.0` / `0.5` | | keyframe every 10° or 0.5 m. **Write `10.0`**: a bare `10` is an int64 override and the node dies at startup with `InvalidParameterTypeException`. |
 | `loop_search_radius` | `1.0` | | m, over past keyframes |
 | `loop_time_tresh` | `60.0` | | s; candidates must be at least this old |
-| `loop_score_tresh` | `0.15` | | ICP fitness (mean squared point distance, m²) above this is rejected |
-| `loop_registration` | `gicp` | | `gicp` (small_gicp) or `icp` (the fork's PCL point-to-point). See "Loop verification" below |
-| `loop_icp_max_corr_dist` | `1.0` | | m, max correspondence distance for either backend. The fork hard-coded 10 |
+| `loop_score_tresh` | `0.15` | | GICP fitness (mean squared point distance, m²) above this is rejected |
+| `loop_max_corr_dist` | `1.0` | | m, max GICP correspondence distance. The fork hard-coded 10. See "Loop verification" below |
 | `loop_gicp_num_threads` | `4` | | **int** |
 | `loop_gicp_num_neighbors` | `20` | | **int**, GICP covariance neighbours |
 | `loop_planar_correction` | `true` | | loop edge is a `PlanarLoopFactor` on the world-frame x / y / yaw only (`pgos/planar_loop_factor.h`); z / roll / pitch stay with the odometry. `false` = the fork's 6-DOF `BetweenFactor` |
@@ -433,7 +453,7 @@ Inputs.
 | `loop_noise_xy_sigma_m` | `0.05` | | only with `loop_planar_correction: true`: the `PlanarLoopFactor`'s x / y sigma, **metres**. Fitness-as-m² (a 0.25-0.39 m sigma) left dp1f_1008_2's east corridor 0.4-0.5 m apart even with the yaw fixed; 0.1 m left 0.08-0.11 m, 0.05 m 0.01-0.04 m, and dp1f_1006 stays within 8 cm at either. `<= 0` = variance = fitness |
 | `keyframe_tilt_sigma_deg` | `0.5` | | **degrees**; a `GravityPriorFactor` (`pgos/gravity_prior_factor.h`) on every keyframe holding its roll / pitch w.r.t. gravity to Point-LIO's value. Needed by the yaw sigma above: without it a yaw correction is realised partly as pitch and the chain climbs or sinks (dp1f_1008_2: keyframe z moved 0.8 m median, 2.2 m worst). `<= 0` = off |
 | `loop_submap_half_range` | `5` | | keyframes each side of the candidate. **An int** — `5.0` is the mirror-image type error. |
-| `submap_resolution` | `0.1` | | m, voxel leaf of the ICP submap |
+| `submap_resolution` | `0.1` | | m, voxel leaf of the GICP submap |
 | `min_loop_detect_duration` | `5.0` | | s between loop searches |
 | `map_cloud_resolution` | `0.2` | | m, voxel leaf of the published merge |
 | `map_cloud_pub_period` | `3.0` | | s, floor between merges |
@@ -467,9 +487,10 @@ corridor-and-hall run; the report and every number below are under
   for the bad ones, so `loop_score_tresh 0.15` rejected nothing (a corridor
   scan with no ICP at all scores 0.09–0.19, because most of its far points
   have no counterpart). Re-running those pairs offline, GICP / point-to-plane
-  with a 1 m correspondence distance returned the right amount. Hence
-  `loop_registration: gicp` (small_gicp's `RegistrationPCL`, the localizer's
-  backend) and `loop_icp_max_corr_dist: 1.0`; `icp` keeps the old path.
+  with a 1 m correspondence distance returned the right amount. Hence GICP
+  (small_gicp's `RegistrationPCL`, the localizer's backend) with
+  `loop_max_corr_dist: 1.0`. The ICP backend stayed selectable for a while
+  and has since been removed; git history has it.
 - **Edge type.** The 6-DOF `BetweenFactor` let a slightly tilted loop bend the
   whole chain: with per-edge rotation variance 1e-6 and 30–60 m of lever arm
   the chain is softer in z than a loop factor whose six variances all equal
@@ -535,7 +556,7 @@ ls /dev/shm/syncai_pgo/<robot_id>                      # map_cloud_<seq>.pcd, ne
 | `[PGONode] inputs: /robot01/pointlio/body_cloud_dense + … \| TF map -> robot01/pointlio_odom \| …` | The names derived from the namespace. Unprefixed names mean a bare run outside `/<robot_id>/pgo`. |
 | `[PGONode] map_cloud merges are handed off as PCD files under …` | The hand-off directory is writable |
 | `[PGONode] loop verification: gicp, max corr dist 1.00 m, fitness gate 0.150, planar correction on, …` | The loop settings that are actually in force (see "Loop verification") |
-| `[PGONode][loop] target 44 -> source 252 \| fitness 0.0995 \| ICP moves source by (0.065, -0.024, 0.000) m, rot 0.21 deg \| z before: …` | A loop was accepted: what the registration asked for (world-frame displacement of the source keyframe and rotation) and both keyframes' z before the graph update. A z component that is not 0.000 with planar correction on, or a rotation of degrees rather than tenths, is the failure this line exists to catch |
+| `[PGONode][loop] target 44 -> source 252 \| fitness 0.0995 \| GICP moves source by (0.065, -0.024, 0.000) m, rot 0.21 deg \| z before: …` | A loop was accepted: what the registration asked for (world-frame displacement of the source keyframe and rotation) and both keyframes' z before the graph update. A z component that is not 0.000 with planar correction on, or a rotation of degrees rather than tenths, is the failure this line exists to catch |
 | `[PGONode][loop] target 44 -> source 252 \| z after: … (source-target -0.047, source moved -0.000)` | The same pair after the update. `source moved` is the z the optimiser actually applied |
 | `[PGONode] cannot create map_cloud_dir … the map_cloud_file hand-off is disabled for this run` | Not fatal; only the file output is off |
 | `Received out of order message` | A pair older than the last accepted one was dropped (bag loop, driver restart) |
@@ -581,7 +602,7 @@ ls /dev/shm/syncai_pgo/<robot_id>                      # map_cloud_<seq>.pcd, ne
   treatment `syncai_pointlio` gives Sophus. Recreating the container from the
   image keeps it; a hand-built one loses it.
 - **An unoptimised build cannot keep up.** CMake defaults `CMAKE_BUILD_TYPE`
-  to Release (upstream forced it); iSAM2 plus an ICP verification per keyframe
+  to Release (upstream forced it); iSAM2 plus a GICP verification per keyframe
   and a full-map merge on the worker are not `-O0` workloads on the Jetson.
 - **Lint is partly off.** `ament_cmake_copyright` and `cpplint` are disabled
   as they were upstream: `pgos/` has no per-file licence headers (the package

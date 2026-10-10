@@ -30,21 +30,18 @@
     key_pose_delta_deg: 10.0
     key_pose_delta_trans: 0.5
     # Loop closure: radius search over past keyframes, at least loop_time_tresh
-    # seconds apart, ICP-verified against a submap of +-loop_submap_half_range
+    # seconds apart, GICP-verified against a submap of +-loop_submap_half_range
     # keyframes voxelised at submap_resolution; a fitness score above
     # loop_score_tresh is rejected. min_loop_detect_duration rate-limits the
     # search.
     loop_search_radius: 1.0
     loop_time_tresh: 60.0
     loop_score_tresh: 0.15
-    # Loop verification (2026-10, after the dp1f_1002 replay -- README has the
-    # measurements). "gicp" = small_gicp GICP; "icp" = the fork's PCL
-    # point-to-point ICP, which returned 1.5-3.7 deg of rotation and 2-7x
-    # too much z on every corridor loop of that run.
-    loop_registration: gicp
-    # Max correspondence distance (m). The fork hard-coded 10, which let a
-    # 30 m corridor scan be steered by its far, non-overlapping points.
-    loop_icp_max_corr_dist: 1.0
+    # Loop verification is small_gicp GICP (2026-10, after the dp1f_1002
+    # replay -- README has the measurements; the fork's PCL ICP was dropped).
+    # Max GICP correspondence distance (m). The fork hard-coded 10, which let
+    # a 30 m corridor scan be steered by its far, non-overlapping points.
+    loop_max_corr_dist: 1.0
     loop_gicp_num_threads: 4       # int
     loop_gicp_num_neighbors: 20    # int
     # Loop edge = a 3-dim factor on the WORLD-frame x / y / yaw between the two
