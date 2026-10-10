@@ -536,14 +536,13 @@ void PGONode::syncCB(
    * odom_msg: LIO odom -> robot pose
    */
 
-  CloudWithPose cp;
-  cp.pose.setTime(cloud_msg->header.stamp.sec, cloud_msg->header.stamp.nanosec);
+  PendingPair pair;
+  pair.pose.setTime(cloud_msg->header.stamp.sec, cloud_msg->header.stamp.nanosec);
   // Recorded for every pair, taken or not: a start_mapping with reset_lio
   // false gates the new run on "after this call" and this is its boundary.
-  m_state.last_seen_time.store(cp.pose.second);
+  m_state.last_seen_time.store(pair.pose.second);
 
-  // Gate before the expensive part: a pair dropped here costs nothing, while
-  // pcl::fromROSMsg below is a full copy of a lidar frame.
+  // Gate first, so a dropped pair costs nothing.
   //
   // Anything but MAPPING drops the pair -- see NodeState::phase. Dropping
   // rather than buffering is the point: a pair produced before a Start or
@@ -562,9 +561,9 @@ void PGONode::syncCB(
   // old run and > is the whole of the new one. Without this, a single
   // straddling frame anchors a BetweenFactor carrying the entire accumulated
   // drift at 1e-6 variance, and the graph never recovers.
-  if (cp.pose.second <= m_state.accept_after_time.load()) return;
+  if (pair.pose.second <= m_state.accept_after_time.load()) return;
 
-  if (cp.pose.second < m_state.last_message_time) {
+  if (pair.pose.second < m_state.last_message_time) {
     RCLCPP_WARN(this->get_logger(), "Received out of order message");
     return;
   }
@@ -575,18 +574,20 @@ void PGONode::syncCB(
   // unguarded, and got away with it only because rclcpp::spin() serialised
   // syncCB against timerCB. main() now runs a MultiThreadedExecutor, so it
   // would not get away with it any more.
-  std::lock_guard<std::mutex> lock(m_state.message_mutex);
-  m_state.last_message_time = cp.pose.second;
-
-  cp.pose.r = Eigen::Quaterniond(
-                odom_msg->pose.pose.orientation.w, odom_msg->pose.pose.orientation.x,
-                odom_msg->pose.pose.orientation.y, odom_msg->pose.pose.orientation.z)
-                .toRotationMatrix();
-  cp.pose.t = V3D(
+  pair.pose.r = Eigen::Quaterniond(
+                  odom_msg->pose.pose.orientation.w, odom_msg->pose.pose.orientation.x,
+                  odom_msg->pose.pose.orientation.y, odom_msg->pose.pose.orientation.z)
+                  .toRotationMatrix();
+  pair.pose.t = V3D(
     odom_msg->pose.pose.position.x, odom_msg->pose.pose.position.y, odom_msg->pose.pose.position.z);
-  cp.cloud = CloudType::Ptr(new CloudType);
-  pcl::fromROSMsg(*cloud_msg, *cp.cloud);
-  m_state.cloud_buffer.push(cp);
+  // Only a pointer to the cloud: the decode happens in timerCB, and only for
+  // a keyframe.
+  pair.cloud_msg = cloud_msg;
+
+  std::lock_guard<std::mutex> lock(m_state.message_mutex);
+  m_state.last_message_time = pair.pose.second;
+  // Overwrite: an untaken older pair is superseded, never queued.
+  m_state.latest_pair = std::move(pair);
 }
 
 void PGONode::sendBroadCastTF(builtin_interfaces::msg::Time & time)
@@ -707,30 +708,35 @@ void PGONode::timerCB()
   // full discipline.
   std::lock_guard<std::mutex> pgo_lock(m_pgo_mutex);
 
-  CloudWithPose cp;
+  PendingPair pair;
   {
-    // front() used to be read OUTSIDE this block, and the block itself used to
-    // be `std::lock_guard<std::mutex>(m_state.message_mutex);` -- a temporary,
-    // so nothing was ever locked. Both are fixed together: the read and the
-    // drain are one critical section against syncCB, which now runs on a
-    // different executor thread.
+    // Take the newest pair and empty the slot in one O(1) critical section
+    // against syncCB, which runs on a different executor thread.
     std::lock_guard<std::mutex> lock(m_state.message_mutex);
-    if (m_state.cloud_buffer.empty()) return;
-    cp = m_state.cloud_buffer.front();  // Take only the oldest entry
-    // Drain the whole queue
-    while (!m_state.cloud_buffer.empty()) {
-      m_state.cloud_buffer.pop();
-    }
+    if (!m_state.latest_pair) return;
+    pair = std::move(*m_state.latest_pair);
+    m_state.latest_pair.reset();
   }
 
   builtin_interfaces::msg::Time cur_time;
-  cur_time.sec = cp.pose.sec;
-  cur_time.nanosec = cp.pose.nsec;
+  cur_time.sec = pair.pose.sec;
+  cur_time.nanosec = pair.pose.nsec;
 
-  if (!m_pgo->addKeyPose(cp)) {  // Keyframe selection
-    sendBroadCastTF(cur_time);   // Not a keyframe -> only broadcast the transform
+  // Keyframe selection needs only the pose. Not a keyframe -> only broadcast
+  // the transform, and the cloud is never decoded.
+  if (!m_pgo->isKeyPose(pair.pose)) {
+    sendBroadCastTF(cur_time);
     return;
   }
+
+  CloudWithPose cp;
+  cp.pose = pair.pose;
+  cp.cloud = CloudType::Ptr(new CloudType);
+  pcl::fromROSMsg(*pair.cloud_msg, *cp.cloud);
+  pair.cloud_msg.reset();
+  // Re-runs the same isKeyPose() check, which cannot change in between: m_pgo
+  // only changes under m_pgo_mutex, held for this whole body.
+  m_pgo->addKeyPose(cp);
 
   // Search for loop closures
   m_pgo->searchForLoopPairs();
@@ -945,9 +951,8 @@ void PGONode::stopRunLocked(const builtin_interfaces::msg::Time & now)
 
   {
     std::lock_guard<std::mutex> lock(m_state.message_mutex);
-    // swap, not a pop() loop: pop() leaves the deque's capacity behind, and
-    // every entry here drags a full body cloud with it.
-    std::queue<CloudWithPose>().swap(m_state.cloud_buffer);
+    // A pair from the old run must not become the new run's first keyframe.
+    m_state.latest_pair.reset();
     m_state.last_message_time = -1.0;
   }
   m_key_pose_count.store(0);

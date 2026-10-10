@@ -34,7 +34,7 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
-#include <queue>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -97,10 +97,25 @@ struct NodeConfig
   map_cleaner::Params map_clean;
 };
 
+// One synchronised cloud+odom pair, as syncCB hands it to timerCB: the pose
+// already decoded (cheap), the cloud still the ROS message. pcl::fromROSMsg is
+// a full copy of a lidar frame, so timerCB does it only for a pair that turns
+// out to be a keyframe.
+struct PendingPair
+{
+  PoseWithTime pose;
+  sensor_msgs::msg::PointCloud2::ConstSharedPtr cloud_msg;
+};
+
 struct NodeState
 {
   std::mutex message_mutex;
-  std::queue<CloudWithPose> cloud_buffer;
+  // The newest pair syncCB accepted that timerCB has not taken yet. One slot,
+  // not a queue: syncCB overwrites it, timerCB moves it out, both O(1) under
+  // message_mutex. A queue here used to grow while timerCB was busy (a slow
+  // optimisation, a save holding m_pgo_mutex) only for timerCB to keep the
+  // OLDEST entry and pop the rest -- every one of them a decoded lidar frame.
+  std::optional<PendingPair> latest_pair;
   // Was uninitialised, so the out-of-order guard in syncCB compared the very
   // first message against whatever was on the stack. -1.0 is the "no message
   // seen yet" value, and is also what resetMappingCB puts back.

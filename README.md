@@ -122,9 +122,10 @@ namespace. The node logs the resolved names at startup, so a bare run
 (subscribing to `/pointlio/…`, which nothing publishes) shows up in the log
 rather than as silence.
 
-The synchroniser only buffers; a 50 ms timer takes the **oldest** pair and
-drains the rest, so under load the graph falls behind by whole frames rather
-than queueing them. Nothing reaches the graph unless the node is MAPPING (see
+The synchroniser keeps only the **newest** pair in a single slot (an older
+untaken one is overwritten), and a 50 ms timer takes it; under load the graph
+skips whole frames rather than queueing them. The cloud is decoded
+(`pcl::fromROSMsg`) only when that pair turns out to be a keyframe. Nothing reaches the graph unless the node is MAPPING (see
 "The run lifecycle"): idle, it drops every pair before the copy and only
 re-broadcasts an identity `map → local_frame`, so the console's live scan —
 which looks that transform up — stays visible while the operator positions
