@@ -33,14 +33,14 @@ Json head(const char * status, const std::string & started_at)
 Json paramsJson(const Params & p)
 {
   Json j;
-  j["resolution"] = p.resolution;
+  j["voxel_size"] = p.voxel_size;
   j["max_range"] = p.max_range;
   j["min_range"] = p.min_range;
   j["lidar_height"] = p.lidar_height;
   j["floor_band"] = p.floor_band;
-  j["max_height"] = p.max_height;
+  j["dynamic_max_height"] = p.dynamic_max_height;
   j["floor_radius"] = p.floor_radius;
-  j["min_hits"] = p.min_hits;
+  j["sparse_min_hits"] = p.sparse_min_hits;
   j["dynamic_miss_ratio"] = p.dynamic_miss_ratio;
   j["dynamic_min_miss"] = p.dynamic_min_miss;
   j["clip_below_floor"] = p.clip_below_floor;

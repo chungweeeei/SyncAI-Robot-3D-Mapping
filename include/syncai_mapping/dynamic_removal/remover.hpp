@@ -45,7 +45,7 @@ inline constexpr const char * kMapFile = "map.pcd";
 struct Params
 {
   // Voxel edge (m): the unit a point is judged in.
-  double resolution = 0.1;
+  double voxel_size = 0.1;
   // Rays are truncated here (m): a point beyond it counts no hit, and the
   // voxels its ray crosses past max_range count no miss.
   double max_range = 20.0;
@@ -62,35 +62,35 @@ struct Params
   // and grazing rays carve real floor voxels "free", which would read as
   // dynamic.
   double floor_band = 0.25;
-  // People are looked for up to floor + max_height (m).
-  double max_height = 2.0;
+  // People are looked for up to floor + dynamic_max_height (m).
+  double dynamic_max_height = 2.0;
   // The local floor comes from keyframes within this radius (m) of a 1 m cell.
   double floor_radius = 10.0;
 
   // Counts are per scan -- a keyframe hits or crosses a voxel at most once --
   // never per ray, which would scale with 1/range^2.
   //
-  // A voxel hit by fewer than min_hits keyframes is "sparse": smear, an edge
+  // A voxel hit by fewer than sparse_min_hits keyframes is "sparse": smear, an edge
   // return, a reflection. 92 % of the occupied voxels outside one solid wall
   // of dp1f_1008_2's east corridor were single-keyframe; real wall voxels are
   // hit by a median of 4-5. <= 1 turns this off.
-  int min_hits = 2;
+  int sparse_min_hits = 2;
   // A voxel hit H >= 1 times and passed through M times is "dynamic" when
   // M >= dynamic_min_miss and M >= dynamic_miss_ratio * H, and it lies
-  // between floor + floor_band and floor + max_height: a person, hit by a
+  // between floor + floor_band and floor + dynamic_max_height: a person, hit by a
   // keyframe or two and seen through by the rest. 2.0 is about OctoMap's own
   // hit / miss log-odds ratio (0.85 / 0.41). Thin static structure (a
   // handrail, a chair leg) has the same signature; measure dynamic_voxels
   // before tightening this. dynamic_min_miss <= 0 turns this off.
   double dynamic_miss_ratio = 2.0;
   int dynamic_min_miss = 3;
-  // Rays that would pass more than (floor_band - resolution) below their own
+  // Rays that would pass more than (floor_band - voxel_size) below their own
   // keyframe's floor stop there, and their returns count as "clipped" hits
   // rather than hits. About 0.4 % of the returns on dp1f_1008_2 land under
   // the floor -- long range, half the usual intensity: specular reflections
   // off a glossy floor -- and their rays would count misses for voxels that
   // are physically under a floor. A clipped return still counts toward
-  // min_hits, so a one-off reflection leaves map.pcd while a lower level seen
+  // sparse_min_hits, so a one-off reflection leaves map.pcd while a lower level seen
   // from many keyframes (stairs down) stays.
   bool clip_below_floor = true;
 };

@@ -27,12 +27,12 @@
 /**/pgo_node:
   ros__parameters:
     # Keyframe selection: a new keyframe every 10 deg or 0.5 m of travel.
-    key_pose_delta_deg: 10.0
-    key_pose_delta_trans: 0.5
+    keyframe_delta_deg: 10.0
+    keyframe_delta_m: 0.5
     # Loop closure: radius search over past keyframes, at least loop_time_tresh
     # seconds apart, GICP-verified against a submap of +-loop_submap_half_range
-    # keyframes voxelised at submap_resolution; a fitness score above
-    # loop_score_tresh is rejected. min_loop_detect_duration rate-limits the
+    # keyframes voxelised at loop_submap_resolution; a fitness score above
+    # loop_score_tresh is rejected. loop_search_period rate-limits the
     # search.
     loop_search_radius: 1.0
     loop_time_tresh: 60.0
@@ -41,7 +41,7 @@
     # replay -- README has the measurements; the fork's PCL ICP was dropped).
     # Max GICP correspondence distance (m). The fork hard-coded 10, which let
     # a 30 m corridor scan be steered by its far, non-overlapping points.
-    loop_max_corr_dist: 1.0
+    loop_gicp_max_corr_dist: 1.0
     loop_gicp_num_threads: 4       # int
     loop_gicp_num_neighbors: 20    # int
     # Loop edge = a 3-dim factor on the WORLD-frame x / y / yaw between the two
@@ -73,8 +73,8 @@
     # 2.2 m worst on dp1f_1008_2 without it. <= 0 = off.
     keyframe_tilt_sigma_deg: 0.5
     loop_submap_half_range: 5     # int, not 5.0 (see the header)
-    submap_resolution: 0.1
-    min_loop_detect_duration: 5.0
+    loop_submap_resolution: 0.1
+    loop_search_period: 5.0
 
     # "Map so far" cloud published on pgo/map_cloud for the operator console
     # while mapping. Merged from every keyframe's *current*
@@ -107,22 +107,22 @@
     # whose rays passed through it, and REPLACES map.pcd -- minutes after the
     # save -- without the "dynamic" voxels (people: passed through
     # >= dynamic_min_miss times and >= dynamic_miss_ratio x as often as hit,
-    # between floor + floor_band and floor + max_height) and the "sparse" ones
-    # (hit by < min_hits keyframes, outside the floor band: smear, edge
-    # returns, reflections). Progress and outcome: map_clean.recipe.json. The
-    # README's "Cleaning map.pcd" has the numbers.
+    # between floor + floor_band and floor + dynamic_max_height) and the
+    # "sparse" ones (hit by < sparse_min_hits keyframes, outside the floor
+    # band: smear, edge returns, reflections). Progress and outcome:
+    # map_clean.recipe.json. The README's "Cleaning map.pcd" has the numbers.
     map_clean_enabled: true
-    map_clean_resolution: 0.1        # voxel edge, m
+    map_clean_voxel_size: 0.1        # voxel edge, m
     map_clean_max_range: 20.0        # rays truncated here, m
     map_clean_min_range: 0.5         # the robot's own body, m
     map_clean_lidar_height: 0.481    # keyframe z minus this is the floor, m
     map_clean_floor_band: 0.25       # +- m around the floor where neither rule applies
-    map_clean_max_height: 2.0        # people are looked for up to floor + this, m
+    map_clean_dynamic_max_height: 2.0  # people are looked for up to floor + this, m
     map_clean_floor_radius: 10.0     # keyframes within this give a cell its floor, m
-    map_clean_min_hits: 2            # int; <= 1 turns the sparse rule off
+    map_clean_sparse_min_hits: 2     # int; <= 1 turns the sparse rule off
     map_clean_dynamic_miss_ratio: 2.0
     map_clean_dynamic_min_miss: 3    # int; <= 0 turns the dynamic rule off
-    # Cut rays at the keyframe's floor - (floor_band - resolution): the 0.4 %
+    # Cut rays at the keyframe's floor - (floor_band - voxel_size): the 0.4 %
     # of returns that land under a glossy floor (reflections) would otherwise
     # count misses for voxels physically under it.
     map_clean_clip_below_floor: true

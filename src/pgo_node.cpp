@@ -408,18 +408,18 @@ void PGONode::loadParameters()
   // match: a bare `10` for a double key is an int64 override that throws
   // InvalidParameterTypeException at startup, and `5.0` for the int key is the
   // mirror-image failure.
-  m_pgo_config.key_pose_delta_deg =
-    this->declare_parameter("key_pose_delta_deg", m_pgo_config.key_pose_delta_deg);
-  m_pgo_config.key_pose_delta_trans =
-    this->declare_parameter("key_pose_delta_trans", m_pgo_config.key_pose_delta_trans);
+  m_pgo_config.keyframe_delta_deg =
+    this->declare_parameter("keyframe_delta_deg", m_pgo_config.keyframe_delta_deg);
+  m_pgo_config.keyframe_delta_m =
+    this->declare_parameter("keyframe_delta_m", m_pgo_config.keyframe_delta_m);
   m_pgo_config.loop_search_radius =
     this->declare_parameter("loop_search_radius", m_pgo_config.loop_search_radius);
   m_pgo_config.loop_time_tresh =
     this->declare_parameter("loop_time_tresh", m_pgo_config.loop_time_tresh);
   m_pgo_config.loop_score_tresh =
     this->declare_parameter("loop_score_tresh", m_pgo_config.loop_score_tresh);
-  m_pgo_config.loop_max_corr_dist =
-    this->declare_parameter("loop_max_corr_dist", m_pgo_config.loop_max_corr_dist);
+  m_pgo_config.loop_gicp_max_corr_dist =
+    this->declare_parameter("loop_gicp_max_corr_dist", m_pgo_config.loop_gicp_max_corr_dist);
   m_pgo_config.loop_gicp_num_threads =
     this->declare_parameter("loop_gicp_num_threads", m_pgo_config.loop_gicp_num_threads);
   m_pgo_config.loop_gicp_num_neighbors =
@@ -439,7 +439,7 @@ void PGONode::loadParameters()
     "[PGONode] loop verification: gicp, max corr dist %.2f m, fitness gate %.3f, planar "
     "correction %s, roll/pitch/z variance %.1e, planar xy sigma %.3f m%s, planar yaw sigma "
     "%.2f deg%s, keyframe tilt sigma %.2f deg%s",
-    m_pgo_config.loop_max_corr_dist, m_pgo_config.loop_score_tresh,
+    m_pgo_config.loop_gicp_max_corr_dist, m_pgo_config.loop_score_tresh,
     m_pgo_config.loop_planar_correction ? "on" : "off", m_pgo_config.loop_noise_var_roll_pitch_z,
     m_pgo_config.loop_noise_xy_sigma_m,
     m_pgo_config.loop_noise_xy_sigma_m > 0.0 ? "" : " (<= 0: variance = fitness)",
@@ -449,39 +449,40 @@ void PGONode::loadParameters()
     m_pgo_config.keyframe_tilt_sigma_deg > 0.0 ? "" : " (<= 0: off)");
   m_pgo_config.loop_submap_half_range =
     this->declare_parameter("loop_submap_half_range", m_pgo_config.loop_submap_half_range);
-  m_pgo_config.submap_resolution =
-    this->declare_parameter("submap_resolution", m_pgo_config.submap_resolution);
-  m_pgo_config.min_loop_detect_duration =
-    this->declare_parameter("min_loop_detect_duration", m_pgo_config.min_loop_detect_duration);
+  m_pgo_config.loop_submap_resolution =
+    this->declare_parameter("loop_submap_resolution", m_pgo_config.loop_submap_resolution);
+  m_pgo_config.loop_search_period =
+    this->declare_parameter("loop_search_period", m_pgo_config.loop_search_period);
 
   // The post-save map cleaning. Handed to clean_map on its command line and
   // recorded in the sidecar, so what a map was cleaned with is on disk beside
-  // it. All doubles except map_clean_nice, map_clean_min_hits and
+  // it. All doubles except map_clean_nice, map_clean_sparse_min_hits and
   // map_clean_dynamic_min_miss (ints) and map_clean_clip_below_floor (bool).
   m_node_config.map_clean_enabled =
     this->declare_parameter("map_clean_enabled", m_node_config.map_clean_enabled);
   m_node_config.map_clean_nice =
     this->declare_parameter("map_clean_nice", m_node_config.map_clean_nice);
   auto & mc = m_node_config.map_clean;
-  mc.resolution = this->declare_parameter("map_clean_resolution", mc.resolution);
+  mc.voxel_size = this->declare_parameter("map_clean_voxel_size", mc.voxel_size);
   mc.max_range = this->declare_parameter("map_clean_max_range", mc.max_range);
   mc.min_range = this->declare_parameter("map_clean_min_range", mc.min_range);
   mc.lidar_height = this->declare_parameter("map_clean_lidar_height", mc.lidar_height);
   mc.floor_band = this->declare_parameter("map_clean_floor_band", mc.floor_band);
-  mc.max_height = this->declare_parameter("map_clean_max_height", mc.max_height);
+  mc.dynamic_max_height =
+    this->declare_parameter("map_clean_dynamic_max_height", mc.dynamic_max_height);
   mc.floor_radius = this->declare_parameter("map_clean_floor_radius", mc.floor_radius);
-  mc.min_hits = this->declare_parameter("map_clean_min_hits", mc.min_hits);
+  mc.sparse_min_hits = this->declare_parameter("map_clean_sparse_min_hits", mc.sparse_min_hits);
   mc.dynamic_miss_ratio =
     this->declare_parameter("map_clean_dynamic_miss_ratio", mc.dynamic_miss_ratio);
   mc.dynamic_min_miss = this->declare_parameter("map_clean_dynamic_min_miss", mc.dynamic_min_miss);
   mc.clip_below_floor = this->declare_parameter("map_clean_clip_below_floor", mc.clip_below_floor);
   RCLCPP_INFO(
     this->get_logger(),
-    "[PGONode] map cleaning after save: %s | %.3f m, range %.1f-%.1f m, lidar height %.3f m, "
-    "floor band %.2f m, max height %.1f m, floor radius %.1f m, min hits %d, dynamic miss ratio "
-    "%.2f, dynamic min miss %d, clip below floor %s, nice %d",
-    m_node_config.map_clean_enabled ? "on" : "off", mc.resolution, mc.min_range, mc.max_range,
-    mc.lidar_height, mc.floor_band, mc.max_height, mc.floor_radius, mc.min_hits,
+    "[PGONode] map cleaning after save: %s | voxel %.3f m, range %.1f-%.1f m, lidar height "
+    "%.3f m, floor band %.2f m, dynamic max height %.1f m, floor radius %.1f m, sparse min hits "
+    "%d, dynamic miss ratio %.2f, dynamic min miss %d, clip below floor %s, nice %d",
+    m_node_config.map_clean_enabled ? "on" : "off", mc.voxel_size, mc.min_range, mc.max_range,
+    mc.lidar_height, mc.floor_band, mc.dynamic_max_height, mc.floor_radius, mc.sparse_min_hits,
     mc.dynamic_miss_ratio, mc.dynamic_min_miss, mc.clip_below_floor ? "on" : "off",
     m_node_config.map_clean_nice);
 
@@ -1302,8 +1303,8 @@ std::string PGONode::startMapClean(const std::filesystem::path & map_dir, bool h
   std::vector<std::string> args = {
     exe,
     map_dir.string(),
-    "--resolution",
-    num(oc.resolution),
+    "--voxel-size",
+    num(oc.voxel_size),
     "--max-range",
     num(oc.max_range),
     "--min-range",
@@ -1312,12 +1313,12 @@ std::string PGONode::startMapClean(const std::filesystem::path & map_dir, bool h
     num(oc.lidar_height),
     "--floor-band",
     num(oc.floor_band),
-    "--max-height",
-    num(oc.max_height),
+    "--dynamic-max-height",
+    num(oc.dynamic_max_height),
     "--floor-radius",
     num(oc.floor_radius),
-    "--min-hits",
-    std::to_string(oc.min_hits),
+    "--sparse-min-hits",
+    std::to_string(oc.sparse_min_hits),
     "--dynamic-miss-ratio",
     num(oc.dynamic_miss_ratio),
     "--dynamic-min-miss",
@@ -1359,8 +1360,8 @@ std::string PGONode::startMapClean(const std::filesystem::path & map_dir, bool h
   m_map_clean_children.push_back({pid, map_dir, std::chrono::steady_clock::now()});
   RCLCPP_INFO(
     this->get_logger(),
-    "[PGONode][map_clean] clean_map pid %d started for %s (%.3f m, nice %d); outcome in %s", pid,
-    map_dir.c_str(), oc.resolution, m_node_config.map_clean_nice,
+    "[PGONode][map_clean] clean_map pid %d started for %s (voxel %.3f m, nice %d); outcome in %s",
+    pid, map_dir.c_str(), oc.voxel_size, m_node_config.map_clean_nice,
     dynamic_removal::recipe::kSidecarFile);
   return " People and stray points are being removed from the map in the background; it can "
          "take a few minutes.";

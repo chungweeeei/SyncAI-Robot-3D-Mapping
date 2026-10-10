@@ -22,13 +22,30 @@ Workspace's in-tree copy (with its own params file) has to go at the same time.
   them in a params file or a launch override has no effect.
 - **`loop_registration` is gone**: loops are always verified with GICP; the fork's PCL ICP backend
   was removed. A `loop_registration` key is ignored.
-- **`loop_icp_max_corr_dist` is renamed `loop_max_corr_dist`.** A params file that still sets the
-  old key is silently ignored and the node uses the default, 1.0 m; rename the key.
+- **Renamed parameters.** A params file that still sets an old key is silently ignored and the
+  node uses the default; rename the key.
+
+  | Workspace copy | Here |
+  |---|---|
+  | `key_pose_delta_deg` | `keyframe_delta_deg` |
+  | `key_pose_delta_trans` | `keyframe_delta_m` |
+  | `loop_icp_max_corr_dist` | `loop_gicp_max_corr_dist` |
+  | `submap_resolution` | `loop_submap_resolution` |
+  | `min_loop_detect_duration` | `loop_search_period` |
+  | `map_clean_resolution` | `map_clean_voxel_size` |
+  | `map_clean_max_height` | `map_clean_dynamic_max_height` |
+  | `map_clean_min_hits` | `map_clean_sparse_min_hits` |
+
+  The three map-cleaning renames carry through to `clean_map`'s flags (`--voxel-size`,
+  `--dynamic-max-height`, `--sparse-min-hits`; the old flags are a usage error) and to the keys
+  of `map_clean.recipe.json`'s `"params"` object (`voxel_size`, `dynamic_max_height`,
+  `sparse_min_hits`), so a reader of those keys has to switch too.
 - The accepted-loop log line reads `GICP moves source by` (was `ICP moves source by`); anything
   that greps the log for it needs the new text.
-- `map_clean.recipe.json` is written with nlohmann/json instead of by hand. Same fields, order and
-  values, but every double-typed parameter now always carries a decimal point: `"max_range":20.0`
-  where it was `20` (also `max_height`, `floor_radius`, `dynamic_miss_ratio`). A reader that
+- `map_clean.recipe.json` is written with nlohmann/json instead of by hand. Same fields (apart
+  from the renames above), order and values, but every double-typed parameter now always carries
+  a decimal point: `"max_range":20.0` where it was `20` (also `dynamic_max_height`,
+  `floor_radius`, `dynamic_miss_ratio`). A reader that
   type-checks those (Python's `json` turns `20` into `int`, `20.0` into `float`) sees a float.
   The `map_cloud_file` notice is byte-for-byte the same format.
 - Internal only, no effect on the ROS interface: `SimplePGO` is `PoseGraphOptimizer`
@@ -242,8 +259,8 @@ rays **passed through** it (M) — per scan, never per ray — and rewrites
 
 | Class | Rule | What it catches |
 |---|---|---|
-| dynamic | `M >= dynamic_min_miss` (3), `M >= dynamic_miss_ratio × H` (2.0), between floor + `floor_band` and floor + `max_height` | people: hit by a keyframe or two, seen through by the rest |
-| sparse | `H < min_hits` (2), not within ±`floor_band` of the floor | smear, edge returns, reflections: 92 % of the occupied voxels outside one solid corridor wall were single-keyframe; real wall voxels have a median of 4–5 |
+| dynamic | `M >= dynamic_min_miss` (3), `M >= dynamic_miss_ratio × H` (2.0), between floor + `floor_band` and floor + `dynamic_max_height` | people: hit by a keyframe or two, seen through by the rest |
+| sparse | `H < sparse_min_hits` (2), not within ±`floor_band` of the floor | smear, edge returns, reflections: 92 % of the occupied voxels outside one solid corridor wall were single-keyframe; real wall voxels have a median of 4–5 |
 
 **Offline on purpose** (decided 2026-10-09: the cleanest final map over a
 clean live preview). A voxel is a person only once a later scan sees through
@@ -272,8 +289,8 @@ or is killed leaves the raw map.
 - *Rays stop at the floor* (`clip_below_floor`). 0.4 % of the returns land
   below the floor — long range, half the usual intensity: reflections off a
   glossy floor. Their rays are cut at keyframe floor − (`floor_band` −
-  resolution) so they count no misses under the floor; the returns still
-  count toward `min_hits`, so a one-off reflection leaves the map and a lower
+  `voxel_size`) so they count no misses under the floor; the returns still
+  count toward `sparse_min_hits`, so a one-off reflection leaves the map and a lower
   level seen from many keyframes stays.
 - *Thin static structure* (a handrail, a chair leg) has the person signature.
   On the stairs of `dp1f_1008_2` 5–7 % of the points went at every height,
@@ -330,8 +347,8 @@ patches, so it is idempotent:
 ```bash
 ros2 run syncai_mapping clean_map map/<name>
 ros2 run syncai_mapping clean_map map/<name> --lock none --dynamic-min-miss 0   # sparse rule only
-#   --resolution 0.1 --max-range 20 --min-range 0.5 --lidar-height 0.481 --floor-band 0.25
-#   --max-height 2.0 --floor-radius 10 --min-hits 2 --dynamic-miss-ratio 2.0
+#   --voxel-size 0.1 --max-range 20 --min-range 0.5 --lidar-height 0.481 --floor-band 0.25
+#   --dynamic-max-height 2.0 --floor-radius 10 --sparse-min-hits 2 --dynamic-miss-ratio 2.0
 #   --dynamic-min-miss 3 --clip-below-floor 1 --nice 0 --started-at <ISO-8601>
 # exit 0 ok · 1 usage · 2 no poses.txt / readable patch · 3 failed · 4 interrupted
 cat map/<name>/map_clean.recipe.json
@@ -452,11 +469,11 @@ Inputs.
 | Parameter | Default (YAML) | Launch value | Notes |
 |---|---|---|---|
 | `map_cloud_dir` | `/dev/shm/syncai_pgo` | `<map_cloud_dir arg>/<robot_id>` | the launch's `map_cloud_dir:=` argument is the base |
-| `key_pose_delta_deg` / `key_pose_delta_trans` | `10.0` / `0.5` | | keyframe every 10° or 0.5 m. **Write `10.0`**: a bare `10` is an int64 override and the node dies at startup with `InvalidParameterTypeException`. |
+| `keyframe_delta_deg` / `keyframe_delta_m` | `10.0` / `0.5` | | keyframe every 10° or 0.5 m. **Write `10.0`**: a bare `10` is an int64 override and the node dies at startup with `InvalidParameterTypeException`. |
 | `loop_search_radius` | `1.0` | | m, over past keyframes |
 | `loop_time_tresh` | `60.0` | | s; candidates must be at least this old |
 | `loop_score_tresh` | `0.15` | | GICP fitness (mean squared point distance, m²) above this is rejected |
-| `loop_max_corr_dist` | `1.0` | | m, max GICP correspondence distance. The fork hard-coded 10. See "Loop verification" below |
+| `loop_gicp_max_corr_dist` | `1.0` | | m, max GICP correspondence distance. The fork hard-coded 10. See "Loop verification" below |
 | `loop_gicp_num_threads` | `4` | | **int** |
 | `loop_gicp_num_neighbors` | `20` | | **int**, GICP covariance neighbours |
 | `loop_planar_correction` | `true` | | loop edge is a `PlanarLoopFactor` on the world-frame x / y / yaw only (`pgos/planar_loop_factor.h`); z / roll / pitch stay with the odometry. `false` = the fork's 6-DOF `BetweenFactor` |
@@ -465,27 +482,27 @@ Inputs.
 | `loop_noise_xy_sigma_m` | `0.05` | | only with `loop_planar_correction: true`: the `PlanarLoopFactor`'s x / y sigma, **metres**. Fitness-as-m² (a 0.25-0.39 m sigma) left dp1f_1008_2's east corridor 0.4-0.5 m apart even with the yaw fixed; 0.1 m left 0.08-0.11 m, 0.05 m 0.01-0.04 m, and dp1f_1006 stays within 8 cm at either. `<= 0` = variance = fitness |
 | `keyframe_tilt_sigma_deg` | `0.5` | | **degrees**; a `GravityPriorFactor` (`pgos/gravity_prior_factor.h`) on every keyframe holding its roll / pitch w.r.t. gravity to Point-LIO's value. Needed by the yaw sigma above: without it a yaw correction is realised partly as pitch and the chain climbs or sinks (dp1f_1008_2: keyframe z moved 0.8 m median, 2.2 m worst). `<= 0` = off |
 | `loop_submap_half_range` | `5` | | keyframes each side of the candidate. **An int** — `5.0` is the mirror-image type error. |
-| `submap_resolution` | `0.1` | | m, voxel leaf of the GICP submap |
-| `min_loop_detect_duration` | `5.0` | | s between loop searches |
+| `loop_submap_resolution` | `0.1` | | m, voxel leaf of the GICP submap |
+| `loop_search_period` | `5.0` | | s between loop searches |
 | `map_cloud_resolution` | `0.2` | | m, voxel leaf of the published merge |
 | `map_cloud_pub_period` | `3.0` | | s, floor between merges |
 | `start_on_launch` | `false` | `start_on_launch:=` argument | `true` comes up MAPPING instead of IDLE: the bag-replay knob, never the session's value |
 | `map_clean_enabled` | `true` | | spawn `clean_map` after a save with `save_patches`; `false` spawns nothing and writes no sidecar |
-| `map_clean_resolution` | `0.1` | | m, the voxel a point is judged in |
+| `map_clean_voxel_size` | `0.1` | | m, the voxel a point is judged in |
 | `map_clean_max_range` / `map_clean_min_range` | `20.0` / `0.5` | | m; rays truncated / returns off the robot's body ignored (and kept) |
 | `map_clean_lidar_height` | `0.481` | | m, lidar above the floor; keyframe z minus this is the floor |
-| `map_clean_floor_band` / `map_clean_max_height` | `0.25` / `2.0` | | m; band around the floor where neither rule applies / top of the dynamic window |
+| `map_clean_floor_band` / `map_clean_dynamic_max_height` | `0.25` / `2.0` | | m; band around the floor where neither rule applies / top of the dynamic window |
 | `map_clean_floor_radius` | `10.0` | | m; keyframes within this give a cell its floor (per level) |
-| `map_clean_min_hits` | `2` | | **int**; fewer keyframes hitting a voxel → its points go. `<= 1` = off |
+| `map_clean_sparse_min_hits` | `2` | | **int**; fewer keyframes hitting a voxel → its points go. `<= 1` = off |
 | `map_clean_dynamic_miss_ratio` / `map_clean_dynamic_min_miss` | `2.0` / `3` | | the person rule; min_miss is an **int**, `<= 0` = off |
-| `map_clean_clip_below_floor` | `true` | | stop rays at keyframe floor − (`floor_band` − resolution) |
+| `map_clean_clip_below_floor` | `true` | | stop rays at keyframe floor − (`floor_band` − `voxel_size`) |
 | `map_clean_nice` | `10` | | **int**, the clean's nice value |
 
 ### Loop verification
 
 A loop candidate (a past keyframe within `loop_search_radius`, at least
 `loop_time_tresh` old) is verified by registering the current keyframe's body
-cloud onto an 11-keyframe submap, both voxelised at `submap_resolution`, and
+cloud onto an 11-keyframe submap, both voxelised at `loop_submap_resolution`, and
 the result becomes the loop edge. Three things about that edge changed in
 2026-10, after an offline replay of `record/dp1f_1002` (a 645 s, 100 m
 corridor-and-hall run; the report and every number below are under
@@ -501,7 +518,7 @@ corridor-and-hall run; the report and every number below are under
   have no counterpart). Re-running those pairs offline, GICP / point-to-plane
   with a 1 m correspondence distance returned the right amount. Hence GICP
   (small_gicp's `RegistrationPCL`, the localizer's backend) with
-  `loop_max_corr_dist: 1.0`. The ICP backend stayed selectable for a while
+  `loop_gicp_max_corr_dist: 1.0`. The ICP backend stayed selectable for a while
   and has since been removed; git history has it.
 - **Edge type.** The 6-DOF `BetweenFactor` let a slightly tilted loop bend the
   whole chain: with per-edge rotation variance 1e-6 and 30–60 m of lever arm

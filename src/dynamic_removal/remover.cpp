@@ -125,7 +125,7 @@ Scan worldScan(
   // One voxel inside the floor band, not at its edge: grazing rays carve all
   // the way down to wherever the clip is (measured on the OctoMap prototype).
   const double clip_z =
-    t.z() - params.lidar_height - std::max(0.0, params.floor_band - params.resolution);
+    t.z() - params.lidar_height - std::max(0.0, params.floor_band - params.voxel_size);
   for (const auto & pt : cloud) {
     const Eigen::Vector3d b(pt.x, pt.y, pt.z);
     const double r = b.norm();
@@ -207,8 +207,9 @@ bool cleanImpl(
 
   // For the key arithmetic and ray traversal only; never updated. Not const:
   // computeDiscreteUpdate reuses scratch members of the tree.
-  octomap::OcTree tree(params.resolution);
-  const double band = params.floor_band, maxh = params.max_height, rad = params.floor_radius;
+  octomap::OcTree tree(params.voxel_size);
+  const double band = params.floor_band, maxh = params.dynamic_max_height,
+               rad = params.floor_radius;
   CountMap counts;
 
   // ---- Pass 1: hits ----
@@ -329,8 +330,8 @@ bool cleanImpl(
       dynamic = !std::isnan(fz) && v.z() >= fz + band && v.z() <= fz + maxh;
     }
     const bool on_floor = !std::isnan(fz) && std::fabs(v.z() - fz) <= band;
-    const bool sparse = !dynamic && !on_floor && params.min_hits > 1 &&
-                        c.hits + c.clipped < (uint32_t)params.min_hits;
+    const bool sparse = !dynamic && !on_floor && params.sparse_min_hits > 1 &&
+                        c.hits + c.clipped < (uint32_t)params.sparse_min_hits;
     if (!dynamic && !sparse) continue;
     c.removed = true;
     (dynamic ? out.dynamic_voxels : out.sparse_voxels)++;

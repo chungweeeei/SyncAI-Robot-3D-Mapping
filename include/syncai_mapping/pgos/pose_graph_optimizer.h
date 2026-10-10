@@ -49,8 +49,8 @@ struct LoopPair
 
 struct PoseGraphOptimizerConfig
 {
-  double key_pose_delta_deg = 10;
-  double key_pose_delta_trans = 1.0;
+  double keyframe_delta_deg = 10;
+  double keyframe_delta_m = 1.0;
   double loop_search_radius = 1.0;
   double loop_time_tresh = 60.0;
   double loop_score_tresh = 0.15;
@@ -64,7 +64,7 @@ struct PoseGraphOptimizerConfig
   // practice disables the gate: a source scan that reaches 30 m down a
   // corridor pairs its far points with whatever the submap has nearest, and
   // those pairs steer the solution. 1.0 since 2026-10.
-  double loop_max_corr_dist = 1.0;
+  double loop_gicp_max_corr_dist = 1.0;
   int loop_gicp_num_threads = 4;
   int loop_gicp_num_neighbors = 20;
   // Constrain only the WORLD-frame x / y / yaw between target and source
@@ -110,8 +110,8 @@ struct PoseGraphOptimizerConfig
   // anchor, the behaviour before 2026-10-09.
   double keyframe_tilt_sigma_deg = 0.5;
   int loop_submap_half_range = 5;
-  double submap_resolution = 0.1;
-  double min_loop_detect_duration = 10.0;
+  double loop_submap_resolution = 0.1;
+  double loop_search_period = 10.0;
 };
 
 class PoseGraphOptimizer

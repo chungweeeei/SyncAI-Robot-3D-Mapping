@@ -18,7 +18,7 @@ PoseGraphOptimizer::PoseGraphOptimizer(const PoseGraphOptimizerConfig & config) 
   m_gicp.setCorrespondenceRandomness(m_config.loop_gicp_num_neighbors);
   m_gicp.setRegistrationType("GICP");
   m_gicp.setMaximumIterations(50);
-  m_gicp.setMaxCorrespondenceDistance(m_config.loop_max_corr_dist);
+  m_gicp.setMaxCorrespondenceDistance(m_config.loop_gicp_max_corr_dist);
   m_gicp.setTransformationEpsilon(1e-6);
 }
 
@@ -48,7 +48,7 @@ bool PoseGraphOptimizer::isKeyPose(const PoseWithTime & pose)
     Eigen::Quaterniond(pose.r).angularDistance(Eigen::Quaterniond(last_item.r_local)) * 57.324;
 
   // Either one exceeding its threshold makes this a key pose
-  if (delta_trans > m_config.key_pose_delta_trans || delta_deg > m_config.key_pose_delta_deg)
+  if (delta_trans > m_config.keyframe_delta_m || delta_deg > m_config.keyframe_delta_deg)
     return true;
 
   return false;
@@ -160,11 +160,11 @@ void PoseGraphOptimizer::searchForLoopPairs()
   if (m_key_poses.size() < 10) return;
 
   // cool down time
-  if (m_config.min_loop_detect_duration > 0.0) {
+  if (m_config.loop_search_period > 0.0) {
     if (m_history_pairs.size() > 0) {
       double current_time = m_key_poses.back().time;
       double last_time = m_key_poses[m_history_pairs.back().second].time;
-      if (current_time - last_time < m_config.min_loop_detect_duration) return;
+      if (current_time - last_time < m_config.loop_search_period) return;
     }
   }
 
@@ -218,8 +218,9 @@ void PoseGraphOptimizer::searchForLoopPairs()
     * and downsampled.
     */
   CloudType::Ptr target_cloud =
-    getSubMap(loop_idx, m_config.loop_submap_half_range, m_config.submap_resolution);
-  CloudType::Ptr source_cloud = getSubMap(m_key_poses.size() - 1, 0, m_config.submap_resolution);
+    getSubMap(loop_idx, m_config.loop_submap_half_range, m_config.loop_submap_resolution);
+  CloudType::Ptr source_cloud =
+    getSubMap(m_key_poses.size() - 1, 0, m_config.loop_submap_resolution);
   M4F loop_transform;
   double fitness = 0.0;
   if (!alignLoop(source_cloud, target_cloud, loop_transform, fitness)) return;
