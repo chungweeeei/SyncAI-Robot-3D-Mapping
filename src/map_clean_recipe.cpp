@@ -1,4 +1,4 @@
-#include "syncai_mapping/octomap_recipe.hpp"
+#include "syncai_mapping/map_clean_recipe.hpp"
 
 #include <unistd.h>
 
@@ -11,10 +11,14 @@
 #include <stdexcept>
 #include <system_error>
 
-namespace syncai_mapping
+namespace syncai_mapping::map_clean_recipe
 {
 
-// Moved here from PGONode (2026-10) when the sidecar became its second user.
+namespace
+{
+
+// A copy of PGONode::jsonEscape: this file must not drag pgo_node in, and
+// clean_map links this file without pgo_node.
 std::string jsonEscape(const std::string & s)
 {
   std::string out;
@@ -49,12 +53,6 @@ std::string jsonEscape(const std::string & s)
   return out;
 }
 
-namespace octomap_recipe
-{
-
-namespace
-{
-
 // Classic locale and 12 significant digits: "0.1" stays "0.1", and a
 // process-wide locale with a decimal comma cannot produce invalid JSON.
 std::ostringstream jsonStream()
@@ -70,7 +68,7 @@ void writeHead(std::ostringstream & os, const char * status, const std::string &
   os << "{\"status\":\"" << status << "\",\"started_at\":\"" << jsonEscape(started_at) << "\"";
 }
 
-void writeParams(std::ostringstream & os, const octomap_builder::Params & p)
+void writeParams(std::ostringstream & os, const map_cleaner::Params & p)
 {
   os << ",\"params\":{\"resolution\":" << p.resolution << ",\"max_range\":" << p.max_range
      << ",\"min_range\":" << p.min_range << ",\"lidar_height\":" << p.lidar_height
@@ -93,7 +91,7 @@ std::string isoUtcNow()
   return buf;
 }
 
-std::string converting(const octomap_builder::Params & params, const std::string & started_at)
+std::string converting(const map_cleaner::Params & params, const std::string & started_at)
 {
   auto os = jsonStream();
   writeHead(os, "converting", started_at);
@@ -103,8 +101,8 @@ std::string converting(const octomap_builder::Params & params, const std::string
 }
 
 std::string ok(
-  const octomap_builder::Params & params, const std::string & started_at,
-  const std::string & finished_at, const octomap_builder::Measurements & m)
+  const map_cleaner::Params & params, const std::string & started_at,
+  const std::string & finished_at, const map_cleaner::Measurements & m)
 {
   auto os = jsonStream();
   writeHead(os, "ok", started_at);
@@ -112,19 +110,15 @@ std::string ok(
   writeParams(os, params);
   os << ",\"measurements\":{\"keyframes\":" << m.keyframes
      << ",\"skipped_patches\":" << m.skipped_patches << ",\"points\":" << m.points
-     << ",\"leaves\":" << m.leaves << ",\"occupied_leaves\":" << m.occupied_leaves
-     << ",\"free_leaves\":" << m.free_leaves << ",\"road_voxels\":" << m.road_voxels
-     << ",\"road_area_m2\":" << m.road_area_m2 << ",\"occupied_voxels\":" << m.occupied_voxels
-     << ",\"dynamic_voxels\":" << m.dynamic_voxels << ",\"sparse_voxels\":" << m.sparse_voxels
+     << ",\"clipped_rays\":" << m.clipped_rays << ",\"dynamic_voxels\":" << m.dynamic_voxels
+     << ",\"sparse_voxels\":" << m.sparse_voxels
      << ",\"map_points_removed\":" << m.map_points_removed
-     << ",\"map_points_kept\":" << m.map_points_kept
-     << ",\"map_pcd_rewritten\":" << (m.map_pcd_rewritten ? "true" : "false")
-     << ",\"clipped_rays\":" << m.clipped_rays << ",\"elapsed_s\":" << m.elapsed_s << "}}";
+     << ",\"map_points_kept\":" << m.map_points_kept << ",\"elapsed_s\":" << m.elapsed_s << "}}";
   return os.str();
 }
 
 std::string failed(
-  const octomap_builder::Params & params, const std::string & started_at,
+  const map_cleaner::Params & params, const std::string & started_at,
   const std::string & finished_at, const std::string & error)
 {
   std::string line = error;
@@ -142,7 +136,7 @@ std::string failed(
 void writeAtomic(const std::filesystem::path & dir, const std::string & json)
 {
   const std::filesystem::path final_path = dir / kSidecarFile;
-  // Per-process temp name: pgo_node and the build it spawned both write this
+  // Per-process temp name: pgo_node and the clean it spawned both write this
   // file, and two writers sharing one .tmp would rename each other's file
   // away (the loser then fails with ENOENT).
   const std::filesystem::path tmp_path =
@@ -166,5 +160,4 @@ void writeAtomic(const std::filesystem::path & dir, const std::string & json)
   }
 }
 
-}  // namespace octomap_recipe
-}  // namespace syncai_mapping
+}  // namespace syncai_mapping::map_clean_recipe

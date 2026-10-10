@@ -49,7 +49,7 @@ RUN git clone --branch ${GTSAM_VERSION} --depth 1 https://github.com/borglab/gts
     && ldconfig \
     && rm -rf /tmp/gtsam
 
-# OctoMap for build_octomap (the rosdep key `octomap`). Its own layer below GTSAM so adding apt
+# OctoMap for clean_map (the rosdep key `octomap`). Its own layer below GTSAM so adding apt
 # packages here never invalidates the slow GTSAM build above.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-${ROS_DISTRO}-octomap \

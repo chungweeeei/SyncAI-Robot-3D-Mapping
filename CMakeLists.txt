@@ -36,17 +36,18 @@ find_package(visualization_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(message_filters REQUIRED)
+# pgo_node finds the clean_map executable it spawns after a save through the
+# package index, so the install tree it runs from decides which one.
+find_package(ament_index_cpp REQUIRED)
 # SaveMaps / ResetMapping (served here) and ResetLIO (the client that drives
 # syncai_pointlio's reset). All three are in syncai_common since the port:
 # the backend, the only caller of the first two, builds against that package.
 find_package(syncai_common REQUIRED)
-# pgo_node finds the build_octomap executable it spawns after a save through
-# the package index, so the install tree it runs from decides which one.
-find_package(ament_index_cpp REQUIRED)
 
-# GTSAM is source-built into /usr/local by the Dockerfile (4.2.0 with system
-# Eigen and TBB on) and has no rosdep key matching that build -- see
-# package.xml. Eigen / PCL come in through
+# GTSAM is source-built into /usr/local by the Dockerfile's deps-builder stage
+# (4.2.0 with system Eigen and TBB on) and has no rosdep key matching that
+# build -- see package.xml. Sophus left with hba_node (2026-10): pgo_node never
+# included it. Eigen / PCL come in through
 # pcl_conversions as well; the explicit finds are for ${PCL_LIBRARIES} and
 # the include dirs GTSAM's headers need unqualified.
 find_package(GTSAM REQUIRED)
@@ -56,13 +57,11 @@ find_package(PCL REQUIRED)
 # Same arrangement as syncai_localizer: src/third-party/small_gicp is a
 # build_type cmake package, ordered before this one by <depend>small_gicp</depend>.
 find_package(small_gicp REQUIRED)
-# The post-save OctoMap build (2026-10). ros-humble-octomap from apt -- the
-# rosdep key `octomap`, in the Dockerfile's dev stage -- rather than a
-# src/third-party checkout: upstream's top level would also put octovis and
+# clean_map's ray traversal and voxel keys (2026-10). ros-humble-octomap from
+# apt -- the rosdep key `octomap`, in the Dockerfile's dev stage -- rather than
+# a src/third-party checkout: upstream's top level would also put octovis and
 # dynamicEDT3D into every colcon build. Its config sets OCTOMAP_INCLUDE_DIRS /
-# OCTOMAP_LIBRARIES. Built without OpenMP (OCTOMAP_OMP defaults off), so the
-# ray-cast is single-threaded -- which is what a job running beside pointlio
-# should be anyway.
+# OCTOMAP_LIBRARIES. No tree is ever built (see map_cleaner.hpp).
 find_package(octomap REQUIRED)
 
 set(SYNCAI_MAPPING_DEPS
@@ -78,26 +77,26 @@ set(SYNCAI_MAPPING_DEPS
   syncai_common
 )
 
-# ---- The post-save OctoMap build: sidecar, builder, CLI ----------------------
+# ---- The post-save map cleaning: sidecar, cleaner, CLI ------------------------
 # Split so pgo_node links neither OctoMap nor the ray-cast: it only writes the
-# "converting" sidecar and spawns build_octomap, which does the rest in its
-# own process (see PGONode::startOctomapBuild for why a process).
-add_library(octomap_recipe STATIC src/octomap_recipe.cpp)
-target_include_directories(octomap_recipe PUBLIC
+# "converting" sidecar and spawns clean_map, which does the rest in its own
+# process (see PGONode::startMapClean for why a process).
+add_library(map_clean_recipe STATIC src/map_clean_recipe.cpp)
+target_include_directories(map_clean_recipe PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
 
-add_library(octomap_builder STATIC src/octomap_builder.cpp)
-target_include_directories(octomap_builder PUBLIC
+add_library(map_cleaner STATIC src/map_cleaner.cpp)
+target_include_directories(map_cleaner PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
   ${OCTOMAP_INCLUDE_DIRS}
   ${EIGEN3_INCLUDE_DIR}
   ${PCL_INCLUDE_DIRS})
-target_link_libraries(octomap_builder PUBLIC ${OCTOMAP_LIBRARIES} ${PCL_LIBRARIES})
+target_link_libraries(map_cleaner PUBLIC ${OCTOMAP_LIBRARIES} ${PCL_LIBRARIES})
 
-add_executable(build_octomap src/build_octomap_main.cpp)
-target_link_libraries(build_octomap octomap_builder octomap_recipe)
+add_executable(clean_map src/clean_map_main.cpp)
+target_link_libraries(clean_map map_cleaner map_clean_recipe)
 
 # ---- pgo_node: the online pose graph (mapping session) ----------------------
 add_executable(pgo_node
@@ -119,10 +118,10 @@ target_link_libraries(pgo_node
   ${PCL_LIBRARIES}
   gtsam
   small_gicp::small_gicp
-  octomap_recipe
+  map_clean_recipe
 )
 
-install(TARGETS pgo_node build_octomap
+install(TARGETS pgo_node clean_map
   DESTINATION lib/${PROJECT_NAME}
 )
 

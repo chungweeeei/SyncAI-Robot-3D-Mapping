@@ -1,8 +1,8 @@
 # SyncAI-Robot-3D-Mapping
 
 The ROS 2 package **`syncai_mapping`** (C++ / `rclcpp`, GTSAM, PCL, small_gicp, OctoMap), moved
-here from `SyncAI-Robot-Workspace/src/syncai_mapping`, plus a Docker environment for developing it
-on its own.
+here from `SyncAI-Robot-Workspace`'s `feat/mapping-dynamic-removal` branch (`src/syncai_mapping`),
+plus a Docker environment for developing it on its own.
 
 **This repo is itself a single colcon package** (`package.xml` / `CMakeLists.txt` at the root). The
 package name, executables, topics, services and parameters are unchanged from the Workspace copy,
@@ -41,7 +41,7 @@ runs.
 
 # syncai_mapping
 
-The mapping back end. `pgo_node` is a pose graph over `syncai_pointlio`'s odometry and body clouds. It picks keyframes, detects and verifies loop
+The mapping back end: one node and a post-save job. `pgo_node` is a pose graph over `syncai_pointlio`'s odometry and body clouds. It picks keyframes, detects and verifies loop
 closures, smooths the graph with GTSAM iSAM2, broadcasts the resulting
 `map → <robot_id>/pointlio_odom` correction while a map is being built, hands
 the "map so far" to the operator console, and serves the three calls that
@@ -49,10 +49,9 @@ bracket a mapping run: `start_mapping`, `save_maps` and `reset_mapping`. It
 comes up **idle** — nothing is banked until `start_mapping`, and a successful
 `save_maps` ends the run — and reports that state on `mapping_status`. It
 runs only in the mapping session; in navigation `syncai_localizer` owns the
-same TF. After a successful save it spawns `build_octomap`, this package's
-third executable, which ray-casts the saved patches into an OctoMap and
-exports the two layers the console's "3D map" draws — detached, so it
-outlives the session (see "The OctoMap build").
+same TF. After a successful save it spawns `clean_map`, this package's second
+executable, which rewrites the saved `map.pcd` without people and one-off
+returns — detached, so it outlives the session (see "Cleaning map.pcd").
 
 ```
    syncai_pointlio            /<id>/pointlio/{body_cloud, lio_odom}
@@ -68,16 +67,13 @@ outlives the session (see "The OctoMap build").
         │          (rviz)      JSON notice ──► /dev/shm/…   map/<name>/    reset_mapping   IDLE / MAPPING /
         │                      (backend: live preview)     map.pcd, patches/, poses.txt   RESETTING (latched)
         │                                                  (ends the run)  (backend: "Start" / "New map")
-        │                                                        │
-        │                                          spawns, detached ▼
-        │                                                  build_octomap ──► map/<name>/octomap.bt,
-        │                                                                    octomap_{road,occupied}.pcd,
-        │                                                                    octomap.recipe.json (status)
 ```
 
 Ported into the workspace from `SyncAI-Fast-LIO2`'s `pgo` package in 2026-09
-(the fork's `localizer` came over last, as `syncai_localizer`; the fork is no
-longer imported).
+(`hba` came over in the same month as this package's second node and was
+removed in 2026-10 — nothing called it, and it was the package's only Sophus
+consumer; `git log -- src/syncai_mapping/src/hba_node.cpp` has it. The
+`localizer` came last, as `syncai_localizer`; the fork is no longer imported).
 The ROS surface did not change with the move — same node name, namespace,
 services, topics, TF, hand-off directory and on-disk layout — so no consumer
 had to. Two things did change: the two service **types** are
@@ -91,7 +87,7 @@ MIT); `pgo_node.*` is the ROS shell.
 
 | Input | Kind | Source | Used for |
 |---|---|---|---|
-| `cloud_topic` = `/<robot_id>/pointlio/body_cloud_dense` | `sensor_msgs/PointCloud2`, depth 10 | `syncai_pointlio` | The keyframe's body-frame scan: deskewed, 3× `body_cloud`'s points (2026-10-09; it was `body_cloud` before). Only x / y / z / intensity are read. |
+| `cloud_topic` = `/<robot_id>/pointlio/body_cloud_dense` | `sensor_msgs/PointCloud2`, depth 10 | `syncai_pointlio` | The keyframe's body-frame scan: deskewed, 3× `body_cloud`'s points (2026-10; it was `body_cloud` before). Only x / y / z / intensity are read. The density is what lets `clean_map` tell people from structure. |
 | `odom_topic` = `/<robot_id>/pointlio/lio_odom` | `nav_msgs/Odometry`, depth 10 | `syncai_pointlio` | The keyframe's pose in `local_frame` |
 
 The two are joined by a `message_filters` `ApproximateTime` synchroniser
@@ -122,7 +118,7 @@ All relative to `/<robot_id>/pgo/` except the TF.
 | `loop_markers` | `MarkerArray`, depth 10000 | Loop-closure nodes and edges for rviz. Subscriber-gated. |
 | `mapping_status` | `syncai_common/msg/MappingStatus`, RELIABLE + TRANSIENT_LOCAL, depth 1 | The run state (`IDLE` / `MAPPING` / `RESETTING`) with the keyframe and loop-closure counts; on every transition and at 1 Hz. What the backend's `GET /api/v1/mapping` answers from. |
 | `start_mapping` | `syncai_common/srv/StartMapping` | Begin a run (IDLE → MAPPING) — see "The run lifecycle". |
-| `save_maps` | `syncai_common/srv/SaveMaps` | Serialise the keyframes and end the run (MAPPING → IDLE), then start the OctoMap build — see below. |
+| `save_maps` | `syncai_common/srv/SaveMaps` | Serialise the keyframes and end the run (MAPPING → IDLE) — see below. |
 | `reset_mapping` | `syncai_common/srv/ResetMapping` | Start a new map in place (MAPPING → MAPPING) — see below. |
 
 Both cloud outputs are keyframe-triggered, subscriber-gated and rate-floored at
@@ -170,19 +166,18 @@ next run, and the backend never does.
 
 | File | Content |
 |---|---|
-| `map.pcd` | Every keyframe's body cloud placed with its loop-closure-corrected global pose and concatenated. Binary, **not** voxel-filtered. **Replaced minutes later** by `build_octomap`'s cleaned copy (same points minus people and one-off returns) when the voxel cleaning is on — see "The OctoMap build". |
+| `map.pcd` | Every keyframe's body cloud placed with its loop-closure-corrected global pose and concatenated. Binary, **not** voxel-filtered. **Replaced minutes later** by `clean_map`'s copy without people and one-off returns (with `save_patches` and `map_clean_enabled`) — see "Cleaning map.pcd". |
 | `patches/<i>.pcd` | (with `save_patches`) one body-frame cloud per keyframe; the directory is removed and recreated |
 | `poses.txt` | (with `save_patches`) one line per keyframe, `<i>.pcd tx ty tz qw qx qy qz`, bare basenames |
-| `octomap.recipe.json` | (with `save_patches` and `octomap_enabled`) the OctoMap build's status, written `converting` before the response goes out — see "The OctoMap build" |
-| `octomap.bt`, `octomap_road.pcd`, `octomap_occupied.pcd` | written minutes later by `build_octomap`, not by this handler — and, with the cleaning on, the cleaned `map.pcd` over the one above |
+| `map_clean.recipe.json` | (with `save_patches` and `map_clean_enabled`) the cleaning's status, written `converting` before the response goes out |
 
-A save with `save_patches` also stops a `build_octomap` still running on the
-same directory (SIGTERM) and deletes the previous `octomap.*` files, any
-`octomap*.tmp` and `map.pcd.tmp` first: their input is being replaced.
+A save with `save_patches` also stops a `clean_map` still running on the same
+directory (SIGTERM) and deletes the previous `map_clean.recipe.json` and any
+`map.pcd.tmp` first: their input is being replaced.
 
 That layout is what the workspace's map catalogue expects under `map/<name>/`. Nothing written names the map or holds an
-absolute path — the sidecar included — which is what makes renaming a map
-directory one `os.rename`; keep it that way. The handler holds `m_pgo_mutex` for its whole body, so a
+absolute path, which is what makes renaming a map directory one `os.rename`;
+keep it that way. The handler holds `m_pgo_mutex` for its whole body, so a
 reset that arrives during a save waits for it (and then finds the node idle
 and is refused).
 
@@ -195,9 +190,6 @@ the same run twice is therefore not possible; the backend converts from
 keyframes, a write error) changes nothing; the write errors are caught and
 reported as `success: false` with the run kept — they used to throw out of
 the callback. `poses.txt` is now only opened when `save_patches` is true.
-The response `message` (UI copy, rendered verbatim) ends with one sentence
-about the 3D map: being built, not built (no patches), or could not start.
-None of those turns the save into a failure — the map is on disk.
 
 `pgo_node` holds its keyframes in RAM and this is the **only** thing that
 writes them out. Whatever has not been saved when the process ends — or when
@@ -205,241 +197,109 @@ writes them out. Whatever has not been saved when the process ends — or when
 mapping session's `lio` window is not optional, and why a mode switch refuses
 to rebuild the live mode.
 
-### The OctoMap build
+### Cleaning map.pcd
 
-Once a save has ended the run, the handler starts one OctoMap build of the
-directory it just wrote: every patch ray-cast from its keyframe pose into an
-`octomap::OcTree`, written as `octomap.bt`, and two point layers derived from
-it for the operator console's "3D map" — nothing during a run changes, the
-live preview is still the map cloud above. It ran by hand from
-`scripts/octomap/` until 2026-10 (that prototype is gone; this is its code,
-same insertion order and arithmetic, verified byte-identical on the `.bt`).
-
-**Input: patches + poses, not `map.pcd`.** `map.pcd` has no sensor origins,
-so OctoMap could only mark its points occupied and every free voxel would stay
-unknown. Free space — the part that says where the floor is clear — exists
-only if each scan is ray-cast from where it was taken, which is what
-`poses.txt` gives every patch. Hence no OctoMap for a save without
-`save_patches`. The ray origin is the keyframe pose, i.e. the IMU origin; the
-lidar is 5.1 cm away (`syncai_pointlio`'s `t_il`), and since both rays end at
-the same point that offset is under one voxel and inside `min_range` anyway.
-
-Each patch goes through what `insertPointCloud` does with `discretize` on (a
-voxel hit by several rays of one scan is updated once), rays truncated at
-`max_range` (free space is carved only that far, and a point beyond it is not
-marked occupied) and returns under `min_range` dropped (the robot's own body).
-The tree is pruned and written as a binary `.bt` — max-likelihood occupancy
-only, what octovis and `octomap_server` load.
-
-**Rays stop at the floor** (`clip_below_floor`, 2026-10-09). A return more
-than `floor_band − resolution` (0.15 m) below its keyframe's floor has its ray
-cut at that height: free space is carved down to it and no further, and the
-endpoint is not inserted. About 0.4 % of the returns on `dp1f_1008_2` land
-under the floor — long range (median 15 m), half the usual intensity, most
-likely specular reflections off a glossy floor — but each one's ray runs
-metres under the floor, and one miss turns an unknown voxel free. Free space
-under the floor takes a column out of the road layer (below), so with the
-3× denser keyframes of `body_cloud_dense` the east corridor's road coverage
-fell from 87 % to 56 %. Cut at the band edge it came back to 79 % — grazing
-rays carve right down to wherever the cut is, one voxel under the band — and
-one voxel inside the band, 100 %. The clipped returns still count for the
-cleaning below: a one-off reflection leaves `map.pcd`, a lower level seen
-from many keyframes stays.
-
-**The two layers.** The free voxels themselves are useless to look at: every
-one is air a ray passed through (42.6 M of them on `dp1f_1006` at 0.05 m) and
-they bury the floor. So:
-
-| File | Holds |
-|---|---|
-| `octomap_road.pcd` | per column, the **lowest free voxel within ±`floor_band` of the local floor** — observed-free space at ground level |
-| `octomap_occupied.pcd` | occupied voxels from local floor − `floor_band` up to + `max_height` — walls, with the ceiling cut |
-
-Both are binary `pcl::PointXYZ` (12 B a point: `FIELDS x y z`), voxel centres
-in the `map` frame — what the backend's PCD reader and its point-cloud wire
-format already take.
-
-The *local* floor is a nearby keyframe's z minus `lidar_height`, looked up per
-1 m cell within `floor_radius`. One global floor level does not work:
-`dp1f_1006`'s floor changes height by about 1 m across the site. A 4 m radius
-left square holes in a hall wider than 8 m; 10 m does not. **Which** keyframe
-depends on the voxel's height too (2026-10-09): only keyframes whose floor is
-at or below the voxel (within `floor_band`) qualify, of those the highest
-level (within 1 m of the highest floor), and of that level the nearest in xy.
-On one floor that is simply the nearest keyframe. Under a second floor the
-xy-nearest keyframe is often upstairs: on `dp1f_1008_2` 51 of the 54 1F path
-cells with no road lay under 2F and took 2F's floor, 5 m off. With the
-height-aware lookup both floors' path cells are 100 % covered, and the 1F
-walls under 2F, filtered out by the same wrong floor, came back (2.3×). On
-the stairs every keyframe has road and a tread under it.
-
-The obvious road definition, "a free voxel with an occupied voxel under it",
-is wrong, and was tried first: it found 391 m² on `dp1f_1006`, the lowest-free
-one 4338 m². Rays to distant floor points cross the near floor at a grazing
-angle and integrate misses into it, so the floor itself ends up free, and the
-voxel under the lowest free one is usually *unknown* (never seen from below),
-not occupied. Expect free floor beyond the walls too: rays through windows
-and doorways observe it, and from above it shows as radial fans. That is also
-why the road layer is **not a traversability map** — it is observed-free
-space at floor height (under tables and outside included), with no slope or
-step check. The drivable area is still the gridmap's.
-
-An empty layer fails the build ("road layer is empty: lidar_height /
-floor_band do not match this save"): it means the band missed the floor — a
-`lidar_height` for another robot — and pcl cannot write an empty PCD anyway.
-
-**Status: `octomap.recipe.json`**, the only surface — modelled on the
-backend's `gridmap.recipe.json`, written `.tmp` + rename (a per-process temp
-name, since this node and the build both write it):
-
-```json
-{"status":"converting","started_at":"2026-10-08T03:12:45Z","params":{"resolution":0.1,"max_range":20,"min_range":0.5,"lidar_height":0.481,"floor_band":0.25,"max_height":2,"floor_radius":10}}
-{"status":"ok","started_at":"…","finished_at":"…","params":{…},"measurements":{"keyframes":1195,"skipped_patches":0,"points":3050000,"leaves":…,"occupied_leaves":…,"free_leaves":…,"road_voxels":…,"road_area_m2":4338,"occupied_voxels":…,"elapsed_s":420.3}}
-{"status":"failed","started_at":"…","finished_at":"…","params":{…},"error":"road layer is empty: …"}
-```
-
-`converting` is written by this node **before** it spawns and before the save
-responds, so a reader acting on the response always finds it. A build killed
-hard (OOM, SIGKILL, `docker stop`) leaves it at `converting` for good —
-`started_at` is there so a reader can age that into "interrupted"; this node
-does not retry. Error text names files relative to the directory only. The
-outputs are renamed into place together at the end, so a failed rebuild
-leaves the previous ones (the sidecar's `failed` outranks them).
-
-**A process, not a thread.** `posix_spawn` of
-`<prefix>/lib/syncai_mapping/build_octomap` (found through the package index)
-with `POSIX_SPAWN_SETSID` and the stop signals reset to default. Each reason
-below decides it alone:
-
-- *Memory.* A build is tens of millions of small octree nodes; in this
-  process that heap would mostly never go back to the OS. The child also
-  writes `oom_score_adj 500`, so under memory pressure the kernel kills the
-  build rather than the node owning the TF and maybe an unsaved run.
-- *Lifetime.* `switch_mode` kills the byobu session — a pty hang-up, SIGHUP,
-  no destructor. Saving and switching straight to AUTO is the normal operator
-  flow, so the build has to outlive this process: in its own session it has
-  no controlling terminal to lose, and it ignores SIGPIPE so printing into a
-  dead pane is harmless.
-- *One entry point.* The same executable is the by-hand rebuild.
-
-It runs at `nice 10`, one core (the apt `liboctomap` has no OpenMP), and its
-progress goes to this node's pane log while the pane exists. This node reaps
-it from the 1 s status timer (`waitpid` WNOHANG, one log line per outcome);
-its destructor neither kills nor waits. Once this node is gone the build is
-reparented to the container's PID 1 — `init: true` in the robot compose
-service makes that tini, which reaps it.
-
-Builds are serialised per host by a `flock` on
-`/dev/shm/syncai_pgo/build_octomap.lock` (`/dev/shm` is shared by every
-container on the robot through `ipc: host`): two saves in a row start two
-builds, and the second waits — its sidecar says `converting` meanwhile.
-
-| Event | `pgo_node` | `build_octomap` | sidecar |
-|---|---|---|---|
-| Ctrl-C in the pane | destructor logs "continues detached" | unaffected | finishes |
-| `switch_mode` / `restart_mode` | gone (SIGHUP) | unaffected | finishes |
-| `pkill -TERM build_octomap` | logs the exit | stops between keyframes, `.tmp`s removed | `failed: interrupted (SIGTERM)` |
-| OOM | survives | killed first | stuck at `converting` |
-| `docker stop` / reboot | gone | gone | stuck at `converting`; rebuild by hand |
-
-**Voxel cleaning: people and one-off returns** (2026-10-09). The build
-counts, per hit voxel, the keyframes whose return ended in it (H) and those
-whose ray passed through it (M) — per scan, never per ray. Pass 1 inserts and
-counts H, pass 2 ray-casts every patch again for M (keyed on hit voxels only:
-keying every crossed voxel would be every free voxel of the site, GBs), then:
+Once a save has ended the run, the handler spawns one `clean_map` on the
+directory it just wrote. It counts, per 0.1 m voxel that some keyframe's
+return ended in, how many keyframes **hit** it (H) and how many keyframes'
+rays **passed through** it (M) — per scan, never per ray — and rewrites
+`map.pcd` without the points of two classes:
 
 | Class | Rule | What it catches |
 |---|---|---|
-| dynamic | `M >= dynamic_min_miss`, `M >= dynamic_miss_ratio × H`, and between floor + `floor_band` and floor + `max_height` | people: hit by a keyframe or two, seen through by the rest. Not in the floor band, where grazing rays carve the real floor free |
-| sparse | `H < min_hits` (clipped returns included), not in the floor band | smear, edge returns, reflections; 92 % of the occupied voxels outside one corridor wall were single-keyframe |
-| static | the rest | |
+| dynamic | `M >= dynamic_min_miss` (3), `M >= dynamic_miss_ratio × H` (2.0), between floor + `floor_band` and floor + `max_height` | people: hit by a keyframe or two, seen through by the rest |
+| sparse | `H < min_hits` (2), not within ±`floor_band` of the floor | smear, edge returns, reflections: 92 % of the occupied voxels outside one solid corridor wall were single-keyframe; real wall voxels have a median of 4–5 |
 
-Dynamic and sparse voxels are set free in the tree (not deleted: unknown
-below is what makes a road voxel), so the `.bt` and both layers agree, and
-pass 3 rewrites `map.pcd` without their points (same concatenation pgo
-writes, poses from `poses.txt`). The floor band is exempt from the sparse
-rule because the lidar samples the floor thinly; applied there it took 17 %
-of a corridor floor.
+**Offline on purpose** (decided 2026-10-09: the cleanest final map over a
+clean live preview). A voxel is a person only once a later scan sees through
+it — often from another angle, often on a revisit — and the judgement needs
+the final, loop-closed poses: before closure the two passes of `dp1f_1008_2`'s
+east corridor were 1.2–2 m apart, and an online check on those poses would
+have deleted real wall at every revisit. An online, windowed filter here
+(Removert / DUFOMap style) and a synchronous clean inside `saveMapsCB` were
+both rejected. The costs, accepted: `map.pcd` is the raw save for the minutes
+the clean runs, the live preview still shows people, and a clean that fails
+or is killed leaves the raw map.
 
-On `dp1f_1008_2` (3× dense keyframes, east corridor):
+**Details that matter:**
 
-| Region | `map.pcd` points kept |
+- *Input: patches + poses, not `map.pcd`.* Seeing through a voxel needs each
+  scan's origin, which only `poses.txt` gives. No clean without
+  `save_patches`. `patches/` stay raw; a rerun re-derives the cleaned map.
+- *The floor band is exempt from both rules.* The lidar samples the floor
+  thinly (12 % of a keyframe's points), so a single hit is the norm there —
+  the sparse rule took 17 % of a corridor floor before the exemption — and
+  rays grazing the floor count misses against real floor voxels.
+- *The local floor is per level.* A voxel's floor is taken from the
+  keyframes whose floor is at or below it, the highest such level, the
+  nearest in xy within `floor_radius`. The xy-nearest keyframe alone gave 1F
+  under 2F the 2F floor.
+- *Rays stop at the floor* (`clip_below_floor`). 0.4 % of the returns land
+  below the floor — long range, half the usual intensity: reflections off a
+  glossy floor. Their rays are cut at keyframe floor − (`floor_band` −
+  resolution) so they count no misses under the floor; the returns still
+  count toward `min_hits`, so a one-off reflection leaves the map and a lower
+  level seen from many keyframes stays.
+- *Thin static structure* (a handrail, a chair leg) has the person signature.
+  On the stairs of `dp1f_1008_2` 5–7 % of the points went at every height,
+  handrail height included, so nothing was singled out; still, measure
+  `dynamic_voxels` and look before tightening the ratio.
+- *It needs the dense input.* On the old 2,640-point `body_cloud` keyframes
+  the same rules removed 31 % of the map and 10–24 % of the walls.
+
+**Numbers** (`dp1f_1008_2`, 2004 dense keyframes, 15.4 M points):
+
+| Region (east corridor unless noted) | `map.pcd` points kept |
 |---|---|
 | corridor interior at person height | 12 % |
 | left / right wall | 91 % / 94 % |
 | outside the left wall (noise) | 71 % |
 | outside the right wall (real structure) | 92 % |
 | floor | 100 % |
-| ceiling | 98 % |
-| stairs, treads / whole stairwell | 98.6 % / 94 % |
+| stairs: treads / whole stairwell | 98.6 % / 94 % |
+| whole map | 1.2 M points removed |
 
-Whole map: 1.2 M of 15.4 M points removed. On the old 2,640-point
-keyframes the same rule removed 31 % and 10–24 % of the walls: it wants
-the dense input. Thin static structure (a handrail, a chair leg) has the
-person signature (small H, large M); the stairwell lost a uniform 5–7 % at
-every height, handrail height included, so nothing was singled out there,
-but measure `dynamic_voxels` and look before tightening the ratio. Cost on
-`dp1f_1008_2`: 11 min, 1.5 GB peak (0.55 GB without cleaning).
+2 min 10 s and 1.0 GB peak on the Mac replay container (no octree is built:
+OctoMap is used only for its voxel keys and ray traversal). With both rules
+off the rewritten `map.pcd` matches pgo's point for point (0.1 mm, from
+`poses.txt`'s 6 significant digits).
 
-**Why the people come out here, not in `pgo_node`** (decided 2026-10-09:
-the cleanest final map over a clean preview). A voxel is a person only once a
-LATER scan sees through it -- often from another angle, often on a revisit --
-and the judgement needs the final, loop-closed poses: before closure the two
-passes of dp1f_1008_2's east corridor were 1.2-2 m apart, and an online check
-on those poses would have deleted real wall at every revisit. Both exist only
-after the save. The ray-casting is also already here. The costs, accepted:
-`map.pcd` is raw for the minutes the build runs (see the table above), the
-live preview still shows people, and a build that fails or is OOM-killed
-leaves the raw map. An online, windowed filter in `pgo_node` (Removert /
-DUFOMap style) and a synchronous one in `saveMapsCB` (11 min on dp1f_1008_2,
-past every caller's timeout) were both considered and rejected.
+**Process model.** A child process, not a thread: the hit-voxel map is
+hundreds of MB that this node's heap would keep, the OOM killer must pick the
+clean (it writes `oom_score_adj 500`) rather than the TF-owning node, and it
+must survive `switch_mode`, which kills the mapping session — saving and
+switching straight to AUTO is the normal flow. `posix_spawn` of
+`<prefix>/lib/syncai_mapping/clean_map` with `POSIX_SPAWN_SETSID`, stop
+signals reset, nice `map_clean_nice`; one at a time per host through a
+`flock` on `/dev/shm/syncai_pgo/clean_map.lock`. This node reaps it from the
+1 s status timer; its destructor neither kills nor waits. The robot service
+runs with `init: true` so a clean orphaned by a mode switch is reaped too.
+A second save into the same directory SIGTERMs the running clean, and every
+clean fingerprints `poses.txt` (device, inode, size, mtime) and re-checks it
+before the rename, failing as `superseded` instead of putting the old save's
+map over the new one.
 
-A second save into a directory whose build is still running is handled twice
-over: `saveMapsCB` SIGTERMs the old build before replacing its input, and
-every build fingerprints `poses.txt` (device, inode, size, mtime) when it
-starts and re-checks it before renaming anything, failing as `superseded`
-instead of putting the old save's outputs — its cleaned `map.pcd` among them —
-over the new one. The new build re-marks the sidecar `converting` once it gets
-the lock, after the stopped one has written its `failed`.
+**Status: `map_clean.recipe.json`**, the only surface: `converting` (written
+by this node before the save responds, again by the clean once it has the
+lock) → `ok` / `failed`, with `started_at`, `finished_at`, the `params` in
+force and, on `ok`, the `measurements` (`dynamic_voxels`, `sparse_voxels`,
+`clipped_rays`, `map_points_removed`, `map_points_kept`, `elapsed_s`, …).
+A hard kill leaves it at `converting` with the raw `map.pcd` in place: age it
+out by `started_at`. **A gridmap converted while it says `converting` was
+made from the raw map**; redo it when it flips to `ok`.
 
-**By hand** — a rebuild of any saved map, with other parameters, or on a
-workstation with only PCL and OctoMap (it is not a ROS node):
+**By hand** — a re-clean of any save with patches; it always starts from the
+patches, so it is idempotent:
 
 ```bash
-ros2 run syncai_mapping build_octomap map/<name>                      # the defaults below
-ros2 run syncai_mapping build_octomap map/<name> --resolution 0.05 --lock none
-#   --max-range 20 --min-range 0.5 --lidar-height 0.481 --floor-band 0.25
-#   --max-height 2.0 --floor-radius 10 --nice 0 --started-at <ISO-8601>
-#   --min-hits 2 --dynamic-miss-ratio 2.0 --dynamic-min-miss 3 --clip-below-floor 1
-ros2 run syncai_mapping build_octomap map/<name> --min-hits 1 --dynamic-min-miss 0   # no cleaning
-# exit 0 ok · 1 usage · 2 no poses.txt / readable patch · 3 build or write failed · 4 interrupted
-cat map/<name>/octomap.recipe.json
-ps -o pid,ppid,sid,ni,rss,etime,cmd -C build_octomap
+ros2 run syncai_mapping clean_map map/<name>
+ros2 run syncai_mapping clean_map map/<name> --lock none --dynamic-min-miss 0   # sparse rule only
+#   --resolution 0.1 --max-range 20 --min-range 0.5 --lidar-height 0.481 --floor-band 0.25
+#   --max-height 2.0 --floor-radius 10 --min-hits 2 --dynamic-miss-ratio 2.0
+#   --dynamic-min-miss 3 --clip-below-floor 1 --nice 0 --started-at <ISO-8601>
+# exit 0 ok · 1 usage · 2 no poses.txt / readable patch · 3 failed · 4 interrupted
+cat map/<name>/map_clean.recipe.json
 ```
-
-**Numbers.** `dp1f_1006` (853 s bag, 477 m path) with the prototype at
-0.05 m, single-threaded in Docker on a Mac:
-
-| | |
-|---|---|
-| Keyframes / points inserted | 1195 / 3.05 M |
-| Leaves | 44.3 M (1.73 M occupied, 42.6 M free) |
-| `.bt` | 25 MB |
-| Road layer | 1.74 M voxels, 4338 m² |
-| Wall time / peak RSS | about 7 min / about 4.5 GB |
-
-Hence the 0.1 m default: roughly 1/8 the free leaves, a quarter of the road
-points (what the console downloads), and a fraction of the memory — a display
-layer does not need the gridmap's 0.05 m. Measure the Jetson at 0.1 m and
-record it here.
-
-**Viewing the `.bt` itself.** Homebrew's `octomap` ships no octovis; a native
-build was made from OctoMap v1.10.0 against Homebrew `qt@5` (build the bundled
-libQGLViewer with `qmake`, pass its `QGLViewer.framework` to CMake as
-`QGLViewer_LIBRARY_DIR_OTHER`). Leave free voxels hidden or they bury the
-floor. Open3D's WebRTC viewer was tried and dropped: it exists only in the
-linux/x86_64 wheel, which on Apple Silicon means Rosetta, Xvfb and software GL,
-and it never rendered.
 
 ### The run lifecycle
 
@@ -538,10 +398,7 @@ mutexes on its hot path; every *store* to the phase happens under
 by-value snapshot of the keyframes, claimed by an atomic (`m_map_cloud_busy`)
 and joined only while that is false; every exception is caught inside the
 worker, because one escaping a `std::thread` is `std::terminate` — pgo gone,
-TF gone, mid-run. The post-save OctoMap build is deliberately not a fourth
-thread but a process (see "The OctoMap build"); the only state it leaves in
-here is the list of spawned pids, touched by `saveMapsCB` and the status
-timer — both in the default group, so it needs no lock. `main()` holds a *named* `shared_ptr` because
+TF gone, mid-run. `main()` holds a *named* `shared_ptr` because
 `Executor::add_node` keeps a weak_ptr; a temporary would leave the executor
 spinning over nothing while looking alive in `ps`.
 
@@ -581,16 +438,16 @@ the values are copied into the graph at construction and on every reset, so
 | `map_cloud_resolution` | `0.2` | | m, voxel leaf of the published merge |
 | `map_cloud_pub_period` | `3.0` | | s, floor between merges |
 | `start_on_launch` | `false` | `start_on_launch:=` argument | `true` comes up MAPPING instead of IDLE: the bag-replay knob, never the session's value |
-| `octomap_enabled` | `true` | | spawn the OctoMap build after a save with `save_patches`; `false` spawns nothing and writes no sidecar |
-| `octomap_resolution` | `0.1` | | m, voxel edge. The prototype's 0.05 cost 4.5 GB on `dp1f_1006` |
-| `octomap_max_range` / `octomap_min_range` | `20.0` / `0.5` | | m; rays truncated / returns off the robot's body dropped |
-| `octomap_lidar_height` | `0.481` | | m, lidar above the floor; keyframe z minus this is the local floor. Wrong → empty road layer → `failed` |
-| `octomap_floor_band` / `octomap_max_height` | `0.25` / `2.0` | | m; road band around the local floor / top of the occupied layer |
-| `octomap_floor_radius` | `10.0` | | m; how far to look for the keyframes that give a cell its floor (per level since 2026-10-09: the highest floor at or below the voxel) |
-| `octomap_nice` | `10` | | **int**, the build's nice value |
-| `octomap_min_hits` | `2` | | **int**; a voxel hit by fewer keyframes is freed and its points leave `map.pcd` — except within ±`floor_band` of the floor. `<= 1` = off |
-| `octomap_clip_below_floor` | `true` | | cut rays at keyframe floor − (`floor_band` − resolution) instead of carving free space under the floor; their returns are not inserted but still count for the cleaning |
-| `octomap_dynamic_miss_ratio` / `octomap_dynamic_min_miss` | `2.0` / `3` | | a voxel between floor + `floor_band` and floor + `max_height` passed through ≥ min_miss times and ≥ ratio × as often as hit is a person: freed, points dropped. min_miss is an **int**, `<= 0` = off. Both off → `map.pcd` is left as saved and the `.bt` is byte-identical to a build without cleaning |
+| `map_clean_enabled` | `true` | | spawn `clean_map` after a save with `save_patches`; `false` spawns nothing and writes no sidecar |
+| `map_clean_resolution` | `0.1` | | m, the voxel a point is judged in |
+| `map_clean_max_range` / `map_clean_min_range` | `20.0` / `0.5` | | m; rays truncated / returns off the robot's body ignored (and kept) |
+| `map_clean_lidar_height` | `0.481` | | m, lidar above the floor; keyframe z minus this is the floor |
+| `map_clean_floor_band` / `map_clean_max_height` | `0.25` / `2.0` | | m; band around the floor where neither rule applies / top of the dynamic window |
+| `map_clean_floor_radius` | `10.0` | | m; keyframes within this give a cell its floor (per level) |
+| `map_clean_min_hits` | `2` | | **int**; fewer keyframes hitting a voxel → its points go. `<= 1` = off |
+| `map_clean_dynamic_miss_ratio` / `map_clean_dynamic_min_miss` | `2.0` / `3` | | the person rule; min_miss is an **int**, `<= 0` = off |
+| `map_clean_clip_below_floor` | `true` | | stop rays at keyframe floor − (`floor_band` − resolution) |
+| `map_clean_nice` | `10` | | **int**, the clean's nice value |
 
 ### Loop verification
 
@@ -672,7 +529,6 @@ ros2 topic echo /<robot_id>/pgo/mapping_status --qos-durability transient_local 
 ros2 run tf2_ros tf2_echo map <robot_id>/pointlio_odom # identity while idle
 ros2 topic echo /<robot_id>/pgo/map_cloud_file --qos-durability transient_local --qos-reliability reliable
 ls /dev/shm/syncai_pgo/<robot_id>                      # map_cloud_<seq>.pcd, newest two; empty while idle
-cat map/<name>/octomap.recipe.json                     # after a save: converting → ok / failed
 ```
 
 | Log line | Meaning |
@@ -688,12 +544,6 @@ cat map/<name>/octomap.recipe.json                     # after a save: convertin
 | `[startMappingCB] Mapping started. …` | A run began; pointlio is re-initialising — the robot must be still |
 | `[resetMappingCB] Map discarded. … (dropped N key poses)` | A reset completed; N = 0 means the run had banked nothing |
 | `[saveMapsCB] Map saved (N keyframes). Mapping stopped … (<dir>/map.pcd)` | The run ended; `/dev/shm` is empty and the node is idle |
-| `[PGONode] octomap after save: on \| 0.100 m, range 0.5-20.0 m, …` | The OctoMap settings in force |
-| `[PGONode][octomap] build_octomap pid N started for <dir> (0.100 m, nice 10); outcome in octomap.recipe.json` | A save started a build |
-| `[build_octomap] 100/1195 keyframes, 255000 points` … `[build_octomap] DONE keyframes=… road_voxels=… (… m2) …` | The build's own progress, printed into this pane while it exists |
-| `[PGONode][octomap] build_octomap pid N finished <dir> in N s` | Reaped, exit 0 |
-| `[PGONode][octomap] build_octomap pid N exited 3 …` / `… killed by signal 9 … (OOM?)` | Failed — the sidecar has the reason; after a signal it is left at `converting` |
-| `[PGONode][octomap] build_octomap executable not found` | Not installed (a partial build); the sidecar says `failed` |
 | `LIO reset service … is not available` / `Timed out waiting for the LIO reset` | Start or reset refused (`nothing started` / `map kept`) — pointlio is down, or built against the old `interface` type |
 
 ## Gotchas
@@ -726,17 +576,9 @@ cat map/<name>/octomap.recipe.json                     # after a save: convertin
   it silently uses the default — so read the startup log.
 - **GTSAM is a manual dependency.** 4.2.0, source-built into `/usr/local` by
   the `Dockerfile`'s `deps-builder` stage (system Eigen, TBB on). There is no
-  rosdep key for that build, so `package.xml` does not list it. Recreating the container from the
+  rosdep key for that build, so `package.xml` does not list it — the same
+  treatment `syncai_pointlio` gives Sophus. Recreating the container from the
   image keeps it; a hand-built one loses it.
-- **OctoMap is not a manual dependency.** Unlike GTSAM, `octomap` is a real
-  rosdep key (`ros-humble-octomap`), installed by the `Dockerfile`'s dev
-  stage. A container from an older image lacks it and `syncai_mapping` fails
-  to configure; `sudo apt-get install ros-humble-octomap` until it is
-  recreated.
-- **The build outlives the session, by design.** A save followed by a mode
-  switch is the normal case; `ps -C build_octomap` in the robot container
-  shows it running on with PPID 1. A sidecar still `converting` with no such
-  process means it was killed — rerun it by hand.
 - **An unoptimised build cannot keep up.** CMake defaults `CMAKE_BUILD_TYPE`
   to Release (upstream forced it); iSAM2 plus an ICP verification per keyframe
   and a full-map merge on the worker are not `-O0` workloads on the Jetson.
@@ -744,5 +586,6 @@ cat map/<name>/octomap.recipe.json                     # after a save: convertin
   as they were upstream: `pgos/` has no per-file licence headers (the package
   `LICENSE` covers it). All four `pgos/` files and the node shell follow the
   workspace `.clang-format`.
-- `rviz/pgo.rviz` from the fork was not carried over (its fixed frame was
-  the upstream `lidar`); rviz configs live in the Workspace's `config/rviz2/`.
+- `rviz/pgo.rviz` and `rviz/hba.rviz` from the fork were not carried over
+  (the former's fixed frame was the upstream `lidar`); rviz configs live in
+  `config/rviz2/`.

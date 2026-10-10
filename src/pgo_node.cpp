@@ -26,7 +26,7 @@
 #include <vector>
 
 #include "ament_index_cpp/get_package_prefix.hpp"
-#include "syncai_mapping/octomap_recipe.hpp"
+#include "syncai_mapping/map_clean_recipe.hpp"
 
 extern char ** environ;
 
@@ -151,22 +151,21 @@ PGONode::~PGONode()
   // A merge may still be running on the worker; joining here keeps shutdown
   // from tearing the publisher down under it.
   if (m_map_cloud_thread.joinable()) m_map_cloud_thread.join();
-  // Neither killed nor waited for, on purpose: the build is detached so that
-  // it survives the mapping session going away (a mode switch right after
-  // the save is the normal operator flow), and this is the one shutdown path
-  // -- Ctrl-C in the pane -- where killing it would even be possible. Its
-  // outcome lands in the sidecar either way.
-  for (const auto & child : m_octomap_children) {
-    RCLCPP_WARN(
-      this->get_logger(),
-      "[PGONode][octomap] build_octomap pid %d for %s continues detached; its outcome lands in "
-      "%s",
-      child.pid, child.dir.c_str(), octomap_recipe::kSidecarFile);
-  }
   // Best effort: the files are ours and nobody else will ever remove them
   // (the dir is the host's tmpfs, so it outlives this container). A stale
   // notice pointing here after we are gone is the reader's ENOENT to skip.
   clearMapCloudDir();
+  // Neither killed nor waited for, on purpose: the clean is detached so that
+  // it survives the mapping session going away (a mode switch right after
+  // the save is the normal operator flow), and this is the one shutdown path
+  // -- Ctrl-C in the pane -- where killing it would even be possible. Its
+  // outcome lands in the sidecar either way.
+  for (const auto & child : m_map_clean_children) {
+    RCLCPP_WARN(
+      this->get_logger(),
+      "[PGONode][map_clean] clean_map pid %d for %s continues detached; its outcome lands in %s",
+      child.pid, child.dir.c_str(), map_clean_recipe::kSidecarFile);
+  }
 }
 
 // ---- The file hand-off (see the map_cloud_file publisher) ----------------
@@ -261,6 +260,40 @@ void PGONode::pruneMapCloudFiles()
     std::error_code rm_ec;
     std::filesystem::remove(pcds[i].second, rm_ec);
   }
+}
+
+std::string PGONode::jsonEscape(const std::string & s)
+{
+  std::string out;
+  out.reserve(s.size() + 2);
+  for (const unsigned char c : s) {
+    switch (c) {
+      case '"':
+        out += "\\\"";
+        break;
+      case '\\':
+        out += "\\\\";
+        break;
+      case '\n':
+        out += "\\n";
+        break;
+      case '\r':
+        out += "\\r";
+        break;
+      case '\t':
+        out += "\\t";
+        break;
+      default:
+        if (c < 0x20) {
+          char buf[8];
+          std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+          out += buf;
+        } else {
+          out += static_cast<char>(c);
+        }
+    }
+  }
+  return out;
 }
 
 // The notice the backend parses. Five fixed fields, hand-formatted so this
@@ -441,36 +474,36 @@ void PGONode::loadParameters()
   m_pgo_config.min_loop_detect_duration =
     this->declare_parameter("min_loop_detect_duration", m_pgo_config.min_loop_detect_duration);
 
-  // The post-save OctoMap build. Handed to build_octomap on its command line
-  // and recorded in the sidecar, so what a map was built with is on disk
-  // beside it. All doubles except octomap_nice, octomap_min_hits and
-  // octomap_dynamic_min_miss.
-  m_node_config.octomap_enabled =
-    this->declare_parameter("octomap_enabled", m_node_config.octomap_enabled);
-  m_node_config.octomap_nice = this->declare_parameter("octomap_nice", m_node_config.octomap_nice);
-  auto & oc = m_node_config.octomap;
-  oc.resolution = this->declare_parameter("octomap_resolution", oc.resolution);
-  oc.max_range = this->declare_parameter("octomap_max_range", oc.max_range);
-  oc.min_range = this->declare_parameter("octomap_min_range", oc.min_range);
-  oc.lidar_height = this->declare_parameter("octomap_lidar_height", oc.lidar_height);
-  oc.floor_band = this->declare_parameter("octomap_floor_band", oc.floor_band);
-  oc.max_height = this->declare_parameter("octomap_max_height", oc.max_height);
-  oc.floor_radius = this->declare_parameter("octomap_floor_radius", oc.floor_radius);
-  oc.min_hits = this->declare_parameter("octomap_min_hits", oc.min_hits);
-  oc.dynamic_miss_ratio =
-    this->declare_parameter("octomap_dynamic_miss_ratio", oc.dynamic_miss_ratio);
-  oc.dynamic_min_miss = this->declare_parameter("octomap_dynamic_min_miss", oc.dynamic_min_miss);
-  oc.clip_below_floor = this->declare_parameter("octomap_clip_below_floor", oc.clip_below_floor);
+  // The post-save map cleaning. Handed to clean_map on its command line and
+  // recorded in the sidecar, so what a map was cleaned with is on disk beside
+  // it. All doubles except map_clean_nice, map_clean_min_hits and
+  // map_clean_dynamic_min_miss (ints) and map_clean_clip_below_floor (bool).
+  m_node_config.map_clean_enabled =
+    this->declare_parameter("map_clean_enabled", m_node_config.map_clean_enabled);
+  m_node_config.map_clean_nice =
+    this->declare_parameter("map_clean_nice", m_node_config.map_clean_nice);
+  auto & mc = m_node_config.map_clean;
+  mc.resolution = this->declare_parameter("map_clean_resolution", mc.resolution);
+  mc.max_range = this->declare_parameter("map_clean_max_range", mc.max_range);
+  mc.min_range = this->declare_parameter("map_clean_min_range", mc.min_range);
+  mc.lidar_height = this->declare_parameter("map_clean_lidar_height", mc.lidar_height);
+  mc.floor_band = this->declare_parameter("map_clean_floor_band", mc.floor_band);
+  mc.max_height = this->declare_parameter("map_clean_max_height", mc.max_height);
+  mc.floor_radius = this->declare_parameter("map_clean_floor_radius", mc.floor_radius);
+  mc.min_hits = this->declare_parameter("map_clean_min_hits", mc.min_hits);
+  mc.dynamic_miss_ratio =
+    this->declare_parameter("map_clean_dynamic_miss_ratio", mc.dynamic_miss_ratio);
+  mc.dynamic_min_miss = this->declare_parameter("map_clean_dynamic_min_miss", mc.dynamic_min_miss);
+  mc.clip_below_floor = this->declare_parameter("map_clean_clip_below_floor", mc.clip_below_floor);
   RCLCPP_INFO(
     this->get_logger(),
-    "[PGONode] octomap after save: %s | %.3f m, range %.1f-%.1f m, lidar height %.3f m, floor "
-    "band %.2f m, max height %.1f m, floor radius %.1f m, nice %d | cleaning: min hits %d, "
-    "dynamic miss ratio %.2f, dynamic min miss %d (map.pcd %s), clip below floor %s",
-    m_node_config.octomap_enabled ? "on" : "off", oc.resolution, oc.min_range, oc.max_range,
-    oc.lidar_height, oc.floor_band, oc.max_height, oc.floor_radius, m_node_config.octomap_nice,
-    oc.min_hits, oc.dynamic_miss_ratio, oc.dynamic_min_miss,
-    oc.cleaning() ? "replaced by the cleaned copy" : "left raw",
-    oc.clip_below_floor ? "on" : "off");
+    "[PGONode] map cleaning after save: %s | %.3f m, range %.1f-%.1f m, lidar height %.3f m, "
+    "floor band %.2f m, max height %.1f m, floor radius %.1f m, min hits %d, dynamic miss ratio "
+    "%.2f, dynamic min miss %d, clip below floor %s, nice %d",
+    m_node_config.map_clean_enabled ? "on" : "off", mc.resolution, mc.min_range, mc.max_range,
+    mc.lidar_height, mc.floor_band, mc.max_height, mc.floor_radius, mc.min_hits,
+    mc.dynamic_miss_ratio, mc.dynamic_min_miss, mc.clip_below_floor ? "on" : "off",
+    m_node_config.map_clean_nice);
 
   // The five values the launch is expected to have overridden. A value here
   // without a robot_id prefix means the node was started bare, or the
@@ -592,9 +625,9 @@ void PGONode::statusTimerCB()
 {
   publishStatus();
   // Here because this timer shares the default group with saveMapsCB, the
-  // only other writer of m_octomap_children; 1 Hz is plenty for a job that
+  // only other writer of m_map_clean_children; 1 Hz is plenty for a job that
   // takes minutes.
-  reapOctomapBuilds();
+  reapMapCleans();
 }
 
 void PGONode::publishLoopMarkers(builtin_interfaces::msg::Time & time)
@@ -1153,8 +1186,11 @@ void PGONode::saveMapsCB(
       if (std::filesystem::exists(poses_txt_path)) {
         std::filesystem::remove(poses_txt_path);
       }
-      stopOctomapBuildFor(p_dir);
-      removeOctomapOutputs(p_dir);
+      // A clean of the previous save into this directory may still be
+      // running; its input is being replaced. clean_map's own poses.txt
+      // fingerprint is what stops it renaming the old map over the new one.
+      stopMapCleanFor(p_dir);
+      removeMapCleanOutputs(p_dir);
       RCLCPP_INFO(this->get_logger(), "Patches Path: %s", patches_dir.string().c_str());
     }
     RCLCPP_INFO(this->get_logger(), "SAVE MAP TO %s", map_path.string().c_str());
@@ -1201,76 +1237,74 @@ void PGONode::saveMapsCB(
   m_state.phase.store(MappingStatus::IDLE);
   publishStatus();
 
-  // After the run has ended, not before: the keyframes are already freed, so
-  // their RAM is back before a multi-GB build starts, and nothing the spawn
-  // does can disturb the transition -- a build that cannot start is reported
-  // in the message and the sidecar, never as a failed save.
-  const std::string octomap_note = startOctomapBuild(p_dir, request->save_patches);
-
   response->success = true;
   // UI copy, rendered verbatim by the console.
+  // After the run has ended, not before: the keyframes are already freed, so
+  // their RAM is back before the clean starts, and nothing the spawn does can
+  // disturb the transition -- a clean that cannot start is reported in the
+  // message and the sidecar, never as a failed save.
+  const std::string clean_note = startMapClean(p_dir, request->save_patches);
   response->message = "Map saved (" + std::to_string(saved) +
-                      " keyframes). Mapping stopped — start it again for another map." +
-                      octomap_note;
+                      " keyframes). Mapping stopped — start it again for another map." + clean_note;
   RCLCPP_WARN(
     this->get_logger(), "[PGONode][saveMapsCB] %s (%s)", response->message.c_str(),
     map_path.string().c_str());
 }
 
-// ---- The post-save OctoMap build -------------------------------------------
+// ---- The post-save map cleaning ---------------------------------------------
 //
-// A child PROCESS, not a fourth thread, for three reasons that each decide it
-// alone:
-//   - Memory. A build is tens of millions of small octree nodes (4.5 GB peak
-//     at 0.05 m on dp1f_1006). In this process that heap would mostly never
-//     go back to the OS, and the next run's keyframes would compete with it;
-//     a process returns all of it at exit. It also writes oom_score_adj 500,
-//     so if anything is killed for memory it is the build, not the node that
-//     owns the TF and possibly an unsaved run.
+// clean_map rewrites map.pcd without people and one-off returns (see
+// map_cleaner.hpp for what and why). A child PROCESS, not a fourth thread,
+// for three reasons that each decide it alone:
+//   - Memory. A clean holds a hash map of every hit voxel of the site --
+//     millions of entries, hundreds of MB. In this process that heap would
+//     mostly never go back to the OS, and the next run's keyframes would
+//     compete with it; a process returns all of it at exit. It also writes
+//     oom_score_adj 500, so if anything is killed for memory it is the clean,
+//     not the node that owns the TF and possibly an unsaved run.
 //   - Lifetime. switch_mode / restart_mode kill the byobu session, which
 //     hangs up the pane's pty: SIGHUP, no destructor, every thread in here
 //     gone. Saving and switching straight back to AUTO is the normal operator
-//     flow, so the build has to outlive this process -- POSIX_SPAWN_SETSID
+//     flow, so the clean has to outlive this process -- POSIX_SPAWN_SETSID
 //     puts it in its own session with no controlling terminal.
-//   - One entry point. The same executable is the by-hand rebuild of any
+//   - One entry point. The same executable is the by-hand re-clean of any
 //     saved map, so the save path is exactly what a developer reruns.
 // posix_spawn rather than fork(): this process has four threads, and a
 // fork()ed copy of a multithreaded process may only call async-signal-safe
 // functions before exec.
-std::string PGONode::startOctomapBuild(const std::filesystem::path & map_dir, bool have_patches)
+std::string PGONode::startMapClean(const std::filesystem::path & map_dir, bool have_patches)
 {
-  if (!m_node_config.octomap_enabled) return "";
+  if (!m_node_config.map_clean_enabled) return "";
   // UI copy, appended to the save's message (rendered verbatim by the
-  // console, which never names its internals -- hence "3D map").
+  // console, which never names its internals).
   if (!have_patches) {
     RCLCPP_INFO(
       this->get_logger(),
-      "[PGONode][octomap] save_patches was false: nothing to ray-cast, no OctoMap for %s",
+      "[PGONode][map_clean] save_patches was false: nothing to ray-cast, %s stays uncleaned",
       map_dir.c_str());
-    return " No 3D map: it is built from per-scan data this save did not keep.";
+    return " People were not removed from this map: that needs the per-scan data this save "
+           "did not keep.";
   }
-  const auto & oc = m_node_config.octomap;
-  const std::string started_at = octomap_recipe::isoUtcNow();
+  const auto & oc = m_node_config.map_clean;
+  const std::string started_at = map_clean_recipe::isoUtcNow();
   // Before the spawn, synchronously: the backend acts on this response, and
   // the sidecar must already say "converting" when it looks.
   try {
-    octomap_recipe::writeAtomic(map_dir, octomap_recipe::converting(oc, started_at));
+    map_clean_recipe::writeAtomic(map_dir, map_clean_recipe::converting(oc, started_at));
   } catch (const std::exception & e) {
     RCLCPP_ERROR(
-      this->get_logger(), "[PGONode][octomap] %s in %s; no OctoMap build", e.what(),
-      map_dir.c_str());
-    return " The 3D map could not be started; the saved map is unaffected.";
+      this->get_logger(), "[PGONode][map_clean] %s in %s; no clean", e.what(), map_dir.c_str());
+    return " Removing people from the map could not be started; the saved map is unaffected.";
   }
 
   std::string exe;
   try {
-    exe =
-      ament_index_cpp::get_package_prefix("syncai_mapping") + "/lib/syncai_mapping/build_octomap";
+    exe = ament_index_cpp::get_package_prefix("syncai_mapping") + "/lib/syncai_mapping/clean_map";
   } catch (const ament_index_cpp::PackageNotFoundError &) {
-    return failOctomapBuild(map_dir, started_at, "build_octomap executable not found");
+    return failMapClean(map_dir, started_at, "clean_map executable not found");
   }
   if (access(exe.c_str(), X_OK) != 0) {
-    return failOctomapBuild(map_dir, started_at, "build_octomap executable not found");
+    return failMapClean(map_dir, started_at, "clean_map executable not found");
   }
 
   auto num = [](double v) {
@@ -1305,7 +1339,7 @@ std::string PGONode::startOctomapBuild(const std::filesystem::path & map_dir, bo
     "--clip-below-floor",
     oc.clip_below_floor ? "1" : "0",
     "--nice",
-    std::to_string(m_node_config.octomap_nice),
+    std::to_string(m_node_config.map_clean_nice),
     "--started-at",
     started_at};
   std::vector<char *> argv;
@@ -1328,41 +1362,42 @@ std::string PGONode::startOctomapBuild(const std::filesystem::path & map_dir, bo
   posix_spawnattr_setflags(
     &attr, POSIX_SPAWN_SETSID | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK);
   pid_t pid = 0;
-  // stdout / stderr are inherited: the build's progress lands in this pane's
+  // stdout / stderr are inherited: the clean's progress lands in this pane's
   // log (log/stack/<robot_id>/mapping/pgo/) for as long as the pane lives.
   const int rc = posix_spawn(&pid, exe.c_str(), nullptr, &attr, argv.data(), environ);
   posix_spawnattr_destroy(&attr);
   if (rc != 0) {
-    return failOctomapBuild(
-      map_dir, started_at, std::string("cannot start build_octomap: ") + std::strerror(rc));
+    return failMapClean(
+      map_dir, started_at, std::string("cannot start clean_map: ") + std::strerror(rc));
   }
-  m_octomap_children.push_back({pid, map_dir, std::chrono::steady_clock::now()});
+  m_map_clean_children.push_back({pid, map_dir, std::chrono::steady_clock::now()});
   RCLCPP_INFO(
     this->get_logger(),
-    "[PGONode][octomap] build_octomap pid %d started for %s (%.3f m, nice %d); outcome in %s", pid,
-    map_dir.c_str(), oc.resolution, m_node_config.octomap_nice, octomap_recipe::kSidecarFile);
-  return " The 3D map is being built in the background; it can take a few minutes.";
+    "[PGONode][map_clean] clean_map pid %d started for %s (%.3f m, nice %d); outcome in %s", pid,
+    map_dir.c_str(), oc.resolution, m_node_config.map_clean_nice, map_clean_recipe::kSidecarFile);
+  return " People and stray points are being removed from the map in the background; it can "
+         "take a few minutes.";
 }
 
-std::string PGONode::failOctomapBuild(
+std::string PGONode::failMapClean(
   const std::filesystem::path & map_dir, const std::string & started_at, const std::string & error)
 {
   RCLCPP_ERROR(
-    this->get_logger(), "[PGONode][octomap] %s (for %s)", error.c_str(), map_dir.c_str());
+    this->get_logger(), "[PGONode][map_clean] %s (for %s)", error.c_str(), map_dir.c_str());
   try {
-    octomap_recipe::writeAtomic(
-      map_dir, octomap_recipe::failed(
-                 m_node_config.octomap, started_at, octomap_recipe::isoUtcNow(), error));
+    map_clean_recipe::writeAtomic(
+      map_dir, map_clean_recipe::failed(
+                 m_node_config.map_clean, started_at, map_clean_recipe::isoUtcNow(), error));
   } catch (const std::exception & e) {
     // The "converting" written a moment ago stays; a reader ages it out.
-    RCLCPP_ERROR(this->get_logger(), "[PGONode][octomap] %s", e.what());
+    RCLCPP_ERROR(this->get_logger(), "[PGONode][map_clean] %s", e.what());
   }
-  return " The 3D map could not be started; the saved map is unaffected.";
+  return " Removing people from the map could not be started; the saved map is unaffected.";
 }
 
-void PGONode::reapOctomapBuilds()
+void PGONode::reapMapCleans()
 {
-  for (auto it = m_octomap_children.begin(); it != m_octomap_children.end();) {
+  for (auto it = m_map_clean_children.begin(); it != m_map_clean_children.end();) {
     int st = 0;
     const pid_t r = waitpid(it->pid, &st, WNOHANG);
     if (r == 0) {
@@ -1376,34 +1411,34 @@ void PGONode::reapOctomapBuilds()
       // which reaps children behind our back. The sidecar still has it all.
       RCLCPP_WARN(
         this->get_logger(),
-        "[PGONode][octomap] cannot wait for build_octomap pid %d (%s); see %s in %s", it->pid,
-        std::strerror(errno), octomap_recipe::kSidecarFile, it->dir.c_str());
+        "[PGONode][map_clean] cannot wait for clean_map pid %d (%s); see %s in %s", it->pid,
+        std::strerror(errno), map_clean_recipe::kSidecarFile, it->dir.c_str());
     } else if (WIFEXITED(st) && WEXITSTATUS(st) == 0) {
       RCLCPP_INFO(
-        this->get_logger(), "[PGONode][octomap] build_octomap pid %d finished %s in %.0f s",
-        it->pid, it->dir.c_str(), secs);
+        this->get_logger(), "[PGONode][map_clean] clean_map pid %d finished %s in %.0f s", it->pid,
+        it->dir.c_str(), secs);
     } else if (WIFEXITED(st)) {
       RCLCPP_ERROR(
         this->get_logger(),
-        "[PGONode][octomap] build_octomap pid %d exited %d after %.0f s; %s in %s has the reason",
-        it->pid, WEXITSTATUS(st), secs, octomap_recipe::kSidecarFile, it->dir.c_str());
+        "[PGONode][map_clean] clean_map pid %d exited %d after %.0f s; %s in %s has the reason",
+        it->pid, WEXITSTATUS(st), secs, map_clean_recipe::kSidecarFile, it->dir.c_str());
     } else {
       RCLCPP_ERROR(
         this->get_logger(),
-        "[PGONode][octomap] build_octomap pid %d killed by signal %d after %.0f s (OOM?); %s in "
+        "[PGONode][map_clean] clean_map pid %d killed by signal %d after %.0f s (OOM?); %s in "
         "%s is left at converting",
-        it->pid, WIFSIGNALED(st) ? WTERMSIG(st) : 0, secs, octomap_recipe::kSidecarFile,
+        it->pid, WIFSIGNALED(st) ? WTERMSIG(st) : 0, secs, map_clean_recipe::kSidecarFile,
         it->dir.c_str());
     }
-    it = m_octomap_children.erase(it);
+    it = m_map_clean_children.erase(it);
   }
 }
 
-void PGONode::stopOctomapBuildFor(const std::filesystem::path & map_dir)
+void PGONode::stopMapCleanFor(const std::filesystem::path & map_dir)
 {
   std::error_code ec;
   const auto target = std::filesystem::weakly_canonical(map_dir, ec);
-  for (const auto & child : m_octomap_children) {
+  for (const auto & child : m_map_clean_children) {
     std::error_code cec;
     if (std::filesystem::weakly_canonical(child.dir, cec) != target) continue;
     // Only a child not yet reaped is in the list, so the pid is still ours
@@ -1411,28 +1446,25 @@ void PGONode::stopOctomapBuildFor(const std::filesystem::path & map_dir)
     if (kill(child.pid, SIGTERM) == 0) {
       RCLCPP_WARN(
         this->get_logger(),
-        "[PGONode][octomap] a new save into %s: stopping build_octomap pid %d, which was "
-        "building the previous one",
+        "[PGONode][map_clean] a new save into %s: stopping clean_map pid %d, which was "
+        "cleaning the previous one",
         map_dir.c_str(), child.pid);
     }
   }
 }
 
-void PGONode::removeOctomapOutputs(const std::filesystem::path & map_dir)
+void PGONode::removeMapCleanOutputs(const std::filesystem::path & map_dir)
 {
   std::error_code ec;
-  for (const char * name :
-       {octomap_builder::kOctomapFile, octomap_builder::kRoadFile, octomap_builder::kOccupiedFile,
-        octomap_recipe::kSidecarFile}) {
-    std::filesystem::remove(map_dir / name, ec);
-  }
-  // The cleaned map.pcd a killed build may have left half-written.
-  std::filesystem::remove(map_dir / (std::string(octomap_builder::kMapFile) + ".tmp"), ec);
-  // And any temp file a killed build left: `<output>.tmp`, and the sidecar's
-  // per-process `octomap.recipe.json.<pid>.tmp`.
+  std::filesystem::remove(map_dir / map_clean_recipe::kSidecarFile, ec);
+  // The cleaned map.pcd a killed clean may have left half-written. map.pcd
+  // itself is the save's own output, written right after this.
+  std::filesystem::remove(map_dir / (std::string(map_cleaner::kMapFile) + ".tmp"), ec);
+  // And the sidecar's per-process `map_clean.recipe.json.<pid>.tmp`.
+  const std::string prefix = std::string(map_clean_recipe::kSidecarFile) + ".";
   for (const auto & entry : std::filesystem::directory_iterator(map_dir, ec)) {
     const std::string name = entry.path().filename().string();
-    if (name.rfind("octomap", 0) == 0 && entry.path().extension() == ".tmp") {
+    if (name.rfind(prefix, 0) == 0 && entry.path().extension() == ".tmp") {
       std::error_code rm_ec;
       std::filesystem::remove(entry.path(), rm_ec);
     }

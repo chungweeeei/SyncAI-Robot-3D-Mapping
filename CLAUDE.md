@@ -1,17 +1,19 @@
 # CLAUDE.md
 
 The ROS 2 package `syncai_mapping` (C++17, `rclcpp`), the SyncAI mapping back end, moved here from
-`~/Projects/SyncAI-Robot-Workspace/src/syncai_mapping` (source commit `c327059` there), with the
-offline `hba_node` (HBA / BALM refinement) left behind: only the pose graph lives here. C++ rather
-than rclrs because GTSAM and PCL are far more mature there. Two executables:
+`~/Projects/SyncAI-Robot-Workspace-dynamic-removal/src/syncai_mapping` (branch
+`feat/mapping-dynamic-removal`, commit `21d338f`), where the offline `hba_node` is already gone:
+only the pose graph and its post-save map cleaning live here. C++ rather than rclrs because GTSAM
+and PCL are far more mature there. Two executables:
 
 - `pgo_node`: pose graph over `syncai_pointlio`'s odometry and dense body clouds. Keyframes, loop
   closure (small_gicp + `PlanarLoopFactor`), GTSAM iSAM2, the `map -> <robot_id>/pointlio_odom`
   TF, and the `start_mapping` / `save_maps` / `reset_mapping` services plus `mapping_status`.
-- `build_octomap`: the detached post-save OctoMap build that `pgo_node` spawns.
+- `clean_map`: the detached post-save job `pgo_node` spawns; it ray-casts the saved patches
+  (OctoMap voxel keys, no tree) and rewrites `map.pcd` without people and one-off returns.
 
 `README.md` is the authoritative behaviour reference (the run lifecycle, threading, loop
-verification, the OctoMap build, gotchas). Read the relevant section before changing behaviour.
+verification, cleaning `map.pcd`, gotchas). Read the relevant section before changing behaviour.
 
 **The external interface is a cross-repo contract**: the package name `syncai_mapping`, executable
 names, node names / namespaces, topics, services (typed by `syncai_common`), parameters and the
