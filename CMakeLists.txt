@@ -63,6 +63,10 @@ find_package(small_gicp REQUIRED)
 # dynamicEDT3D into every colcon build. Its config sets OCTOMAP_INCLUDE_DIRS /
 # OCTOMAP_LIBRARIES. No tree is ever built (see map_cleaner.hpp).
 find_package(octomap REQUIRED)
+# The JSON this package writes: pgo_node's map_cloud_file notice and
+# map_clean.recipe.json (both pgo_node and clean_map write the latter).
+# Header-only, from apt (nlohmann-json3-dev, the rosdep key nlohmann-json-dev).
+find_package(nlohmann_json 3.2.0 REQUIRED)
 
 set(SYNCAI_MAPPING_DEPS
   rclcpp
@@ -85,6 +89,7 @@ add_library(map_clean_recipe STATIC src/map_clean_recipe.cpp)
 target_include_directories(map_clean_recipe PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
+target_link_libraries(map_clean_recipe PRIVATE nlohmann_json::nlohmann_json)
 
 add_library(map_cleaner STATIC src/map_cleaner.cpp)
 target_include_directories(map_cleaner PUBLIC
@@ -119,6 +124,7 @@ target_link_libraries(pgo_node
   gtsam
   small_gicp::small_gicp
   map_clean_recipe
+  nlohmann_json::nlohmann_json
 )
 
 install(TARGETS pgo_node clean_map

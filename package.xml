@@ -44,6 +44,9 @@
        it resolves to ros-humble-octomap, which the Dockerfile's dev stage
        installs, so `rosdep check` stays quiet. -->
   <depend>octomap</depend>
+  <!-- The map_cloud_file notice and map_clean.recipe.json. Header-only; the
+       rosdep key resolves to nlohmann-json3-dev on Ubuntu 22.04. -->
+  <depend>nlohmann-json-dev</depend>
 
   <!-- Not listed on purpose: PCL, Eigen and GTSAM. PCL / Eigen arrive
        through pcl_conversions' own rosdep chain (libpcl-dev, libeigen3-dev).

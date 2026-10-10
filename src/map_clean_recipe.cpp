@@ -2,14 +2,12 @@
 
 #include <unistd.h>
 
-#include <cstdio>
 #include <ctime>
 #include <fstream>
-#include <iomanip>
-#include <locale>
-#include <sstream>
 #include <stdexcept>
 #include <system_error>
+
+#include "nlohmann/json.hpp"
 
 namespace syncai_mapping::map_clean_recipe
 {
@@ -17,66 +15,44 @@ namespace syncai_mapping::map_clean_recipe
 namespace
 {
 
-// A copy of PGONode::jsonEscape: this file must not drag pgo_node in, and
-// clean_map links this file without pgo_node.
-std::string jsonEscape(const std::string & s)
+// ordered_json: fields come out in insertion order, the order documented in
+// the header (status, started_at, finished_at, params, then measurements or
+// error). nlohmann formats numbers locale-independently and as the shortest
+// text that round-trips, and writes NaN / inf as null rather than invalid
+// JSON.
+using Json = nlohmann::ordered_json;
+
+Json head(const char * status, const std::string & started_at)
 {
-  std::string out;
-  out.reserve(s.size() + 2);
-  for (const unsigned char c : s) {
-    switch (c) {
-      case '"':
-        out += "\\\"";
-        break;
-      case '\\':
-        out += "\\\\";
-        break;
-      case '\n':
-        out += "\\n";
-        break;
-      case '\r':
-        out += "\\r";
-        break;
-      case '\t':
-        out += "\\t";
-        break;
-      default:
-        if (c < 0x20) {
-          char buf[8];
-          std::snprintf(buf, sizeof(buf), "\\u%04x", c);
-          out += buf;
-        } else {
-          out += static_cast<char>(c);
-        }
-    }
-  }
-  return out;
+  Json j;
+  j["status"] = status;
+  j["started_at"] = started_at;
+  return j;
 }
 
-// Classic locale and 12 significant digits: "0.1" stays "0.1", and a
-// process-wide locale with a decimal comma cannot produce invalid JSON.
-std::ostringstream jsonStream()
+Json paramsJson(const map_cleaner::Params & p)
 {
-  std::ostringstream os;
-  os.imbue(std::locale::classic());
-  os << std::setprecision(12);
-  return os;
+  Json j;
+  j["resolution"] = p.resolution;
+  j["max_range"] = p.max_range;
+  j["min_range"] = p.min_range;
+  j["lidar_height"] = p.lidar_height;
+  j["floor_band"] = p.floor_band;
+  j["max_height"] = p.max_height;
+  j["floor_radius"] = p.floor_radius;
+  j["min_hits"] = p.min_hits;
+  j["dynamic_miss_ratio"] = p.dynamic_miss_ratio;
+  j["dynamic_min_miss"] = p.dynamic_min_miss;
+  j["clip_below_floor"] = p.clip_below_floor;
+  return j;
 }
 
-void writeHead(std::ostringstream & os, const char * status, const std::string & started_at)
+// Compact, one line. `replace` instead of the default `strict`: an error text
+// from the OS or a library is not guaranteed to be valid UTF-8, and a status
+// write must not throw over it.
+std::string dump(const Json & j)
 {
-  os << "{\"status\":\"" << status << "\",\"started_at\":\"" << jsonEscape(started_at) << "\"";
-}
-
-void writeParams(std::ostringstream & os, const map_cleaner::Params & p)
-{
-  os << ",\"params\":{\"resolution\":" << p.resolution << ",\"max_range\":" << p.max_range
-     << ",\"min_range\":" << p.min_range << ",\"lidar_height\":" << p.lidar_height
-     << ",\"floor_band\":" << p.floor_band << ",\"max_height\":" << p.max_height
-     << ",\"floor_radius\":" << p.floor_radius << ",\"min_hits\":" << p.min_hits
-     << ",\"dynamic_miss_ratio\":" << p.dynamic_miss_ratio
-     << ",\"dynamic_min_miss\":" << p.dynamic_min_miss
-     << ",\"clip_below_floor\":" << (p.clip_below_floor ? "true" : "false") << "}";
+  return j.dump(-1, ' ', false, Json::error_handler_t::replace);
 }
 
 }  // namespace
@@ -93,28 +69,29 @@ std::string isoUtcNow()
 
 std::string converting(const map_cleaner::Params & params, const std::string & started_at)
 {
-  auto os = jsonStream();
-  writeHead(os, "converting", started_at);
-  writeParams(os, params);
-  os << "}";
-  return os.str();
+  Json j = head("converting", started_at);
+  j["params"] = paramsJson(params);
+  return dump(j);
 }
 
 std::string ok(
   const map_cleaner::Params & params, const std::string & started_at,
   const std::string & finished_at, const map_cleaner::Measurements & m)
 {
-  auto os = jsonStream();
-  writeHead(os, "ok", started_at);
-  os << ",\"finished_at\":\"" << jsonEscape(finished_at) << "\"";
-  writeParams(os, params);
-  os << ",\"measurements\":{\"keyframes\":" << m.keyframes
-     << ",\"skipped_patches\":" << m.skipped_patches << ",\"points\":" << m.points
-     << ",\"clipped_rays\":" << m.clipped_rays << ",\"dynamic_voxels\":" << m.dynamic_voxels
-     << ",\"sparse_voxels\":" << m.sparse_voxels
-     << ",\"map_points_removed\":" << m.map_points_removed
-     << ",\"map_points_kept\":" << m.map_points_kept << ",\"elapsed_s\":" << m.elapsed_s << "}}";
-  return os.str();
+  Json j = head("ok", started_at);
+  j["finished_at"] = finished_at;
+  j["params"] = paramsJson(params);
+  Json & mj = j["measurements"];
+  mj["keyframes"] = m.keyframes;
+  mj["skipped_patches"] = m.skipped_patches;
+  mj["points"] = m.points;
+  mj["clipped_rays"] = m.clipped_rays;
+  mj["dynamic_voxels"] = m.dynamic_voxels;
+  mj["sparse_voxels"] = m.sparse_voxels;
+  mj["map_points_removed"] = m.map_points_removed;
+  mj["map_points_kept"] = m.map_points_kept;
+  mj["elapsed_s"] = m.elapsed_s;
+  return dump(j);
 }
 
 std::string failed(
@@ -125,12 +102,11 @@ std::string failed(
   for (char & c : line) {
     if (c == '\n' || c == '\r') c = ' ';
   }
-  auto os = jsonStream();
-  writeHead(os, "failed", started_at);
-  os << ",\"finished_at\":\"" << jsonEscape(finished_at) << "\"";
-  writeParams(os, params);
-  os << ",\"error\":\"" << jsonEscape(line) << "\"}";
-  return os.str();
+  Json j = head("failed", started_at);
+  j["finished_at"] = finished_at;
+  j["params"] = paramsJson(params);
+  j["error"] = line;
+  return dump(j);
 }
 
 void writeAtomic(const std::filesystem::path & dir, const std::string & json)

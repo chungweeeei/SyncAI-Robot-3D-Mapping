@@ -26,6 +26,11 @@ Workspace's in-tree copy (with its own params file) has to go at the same time.
   old key is silently ignored and the node uses the default, 1.0 m; rename the key.
 - The accepted-loop log line reads `GICP moves source by` (was `ICP moves source by`); anything
   that greps the log for it needs the new text.
+- `map_clean.recipe.json` is written with nlohmann/json instead of by hand. Same fields, order and
+  values, but every double-typed parameter now always carries a decimal point: `"max_range":20.0`
+  where it was `20` (also `max_height`, `floor_radius`, `dynamic_miss_ratio`). A reader that
+  type-checks those (Python's `json` turns `20` into `int`, `20.0` into `float`) sees a float.
+  The `map_cloud_file` notice is byte-for-byte the same format.
 - Internal only, no effect on the ROS interface: `SimplePGO` is `PoseGraphOptimizer`
   (`pgos/pose_graph_optimizer.*`), its `Config` is `PoseGraphOptimizerConfig`, and
   `src/pgo_main.cpp` is `src/main.cpp`.
@@ -166,7 +171,7 @@ exactly five fields:
 {"seq":12,"path":"/dev/shm/syncai_pgo/robot01/map_cloud_12.pcd","points":1830412,"frame_id":"map","stamp":{"sec":1727,"nanosec":0}}
 ```
 
-Hand-formatted on purpose — this node grows no JSON dependency. The reader
+Written with nlohmann/json (`ordered_json`, so the fields keep this order). The reader
 must subscribe TRANSIENT_LOCAL, or nothing is replayed to a backend
 (re)started mid-run. `map_cloud_dir` is `/dev/shm/syncai_pgo/<robot_id>` (the
 launch appends the robot_id): the host's tmpfs, which the backend's container

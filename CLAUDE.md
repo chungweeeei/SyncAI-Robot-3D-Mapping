@@ -51,8 +51,10 @@ docker exec syncai-robot-3d-mapping bash -lc 'cd /workspace && colcon test --pac
   Workspace image (system Eigen, no march-native, TBB on, shared). Keep them in step with the
   Workspace: a GTSAM built with its bundled Eigen or `-march=native` causes Eigen-alignment crashes
   when mixed with PCL. It has no `<depend>` in `package.xml` on purpose.
-- PCL, Eigen and OctoMap come from apt (`ros-humble-pcl-ros`, `libeigen3-dev`,
-  `ros-humble-octomap`).
+- PCL, Eigen, OctoMap and nlohmann/json come from apt (`ros-humble-pcl-ros`, `libeigen3-dev`,
+  `ros-humble-octomap`, `nlohmann-json3-dev`). All JSON this package writes (the
+  `map_cloud_file` notice, `map_clean.recipe.json`) goes through `nlohmann::ordered_json`; do not
+  hand-format JSON again.
 - `syncai_common` and `small_gicp` are colcon packages from `dependencies.repos`; keep those pins in
   step with the Workspace's `interface.repos` / `third-party.repos`.
 

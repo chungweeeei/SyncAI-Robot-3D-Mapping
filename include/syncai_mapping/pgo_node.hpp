@@ -161,7 +161,6 @@ public:
   static bool isMapCloudFile(const std::filesystem::directory_entry & entry);
   void clearMapCloudDir();
   void pruneMapCloudFiles();
-  static std::string jsonEscape(const std::string & s);
   std::string mapCloudNoticeJson(
     uint64_t seq, const std::string & path, size_t points,
     const builtin_interfaces::msg::Time & time) const;

@@ -11,7 +11,6 @@
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
-#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -26,6 +25,7 @@
 #include <vector>
 
 #include "ament_index_cpp/get_package_prefix.hpp"
+#include "nlohmann/json.hpp"
 #include "syncai_mapping/map_clean_recipe.hpp"
 
 extern char ** environ;
@@ -274,42 +274,8 @@ void PGONode::pruneMapCloudFiles()
   }
 }
 
-std::string PGONode::jsonEscape(const std::string & s)
-{
-  std::string out;
-  out.reserve(s.size() + 2);
-  for (const unsigned char c : s) {
-    switch (c) {
-      case '"':
-        out += "\\\"";
-        break;
-      case '\\':
-        out += "\\\\";
-        break;
-      case '\n':
-        out += "\\n";
-        break;
-      case '\r':
-        out += "\\r";
-        break;
-      case '\t':
-        out += "\\t";
-        break;
-      default:
-        if (c < 0x20) {
-          char buf[8];
-          std::snprintf(buf, sizeof(buf), "\\u%04x", c);
-          out += buf;
-        } else {
-          out += static_cast<char>(c);
-        }
-    }
-  }
-  return out;
-}
-
-// The notice the backend parses. Five fixed fields, hand-formatted so this
-// node grows no JSON dependency:
+// The notice the backend parses. Five fixed fields, in this order (ordered_json
+// keeps insertion order):
 //   seq       monotonic within this process; informational for the reader
 //             (a restart begins again at 1, and the reader applies it anyway)
 //   path      absolute path of the PCD, "" when the map is empty
@@ -320,11 +286,16 @@ std::string PGONode::mapCloudNoticeJson(
   uint64_t seq, const std::string & path, size_t points,
   const builtin_interfaces::msg::Time & time) const
 {
-  std::ostringstream os;
-  os << "{\"seq\":" << seq << ",\"path\":\"" << jsonEscape(path) << "\",\"points\":" << points
-     << ",\"frame_id\":\"" << jsonEscape(m_node_config.map_frame)
-     << "\",\"stamp\":{\"sec\":" << time.sec << ",\"nanosec\":" << time.nanosec << "}}";
-  return os.str();
+  nlohmann::ordered_json j;
+  j["seq"] = seq;
+  j["path"] = path;
+  j["points"] = points;
+  j["frame_id"] = m_node_config.map_frame;
+  j["stamp"]["sec"] = time.sec;
+  j["stamp"]["nanosec"] = time.nanosec;
+  // `replace`, not the default `strict`: map_cloud_dir comes from a parameter
+  // and need not be valid UTF-8, and a notice must not throw over it.
+  return j.dump(-1, ' ', false, nlohmann::ordered_json::error_handler_t::replace);
 }
 
 void PGONode::publishMapCloudNotice(
