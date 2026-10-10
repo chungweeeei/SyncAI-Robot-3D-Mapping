@@ -59,6 +59,7 @@
        the fork's `<depend>GTSAM</depend>` used to produce. Same treatment
        syncai_pointlio gives Sophus. -->
 
+  <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
 

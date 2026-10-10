@@ -16,7 +16,8 @@
 # here is only the fallback for running the node bare.
 #
 # Numeric types matter. The node declares every tuning value below as a double
-# EXCEPT loop_submap_half_range (an int): a bare `10` for a double key is an
+# EXCEPT the ints marked `# int` (loop_submap_half_range and friends) and the
+# bool / string switches: a bare `10` for a double key is an
 # int64 override that kills the node at startup with
 # InvalidParameterTypeException, and `5.0` for the int key is the mirror-image
 # failure. Doubles are written with a decimal point throughout.
@@ -75,6 +76,38 @@
     loop_submap_half_range: 5     # int, not 5.0 (see the header)
     loop_submap_resolution: 0.1
     loop_search_period: 5.0
+    # Robust kernel on every loop factor, as Cartographer puts a Huber loss on
+    # its loop constraints: huber / cauchy / none. The scale is in sigmas of
+    # the loop noise above; a correct loop settles at ~3 sigma, so 5 leaves it
+    # untouched and only bounds the pull of a wrong one.
+    loop_robust_kernel: huber
+    loop_robust_kernel_scale: 5.0
+    # Loop gates after GICP, over the OVERLAP only (source points with a
+    # submap point within loop_gicp_max_corr_dist): its share of the scan,
+    # the share of it within loop_inlier_dist (m), and loop_score_tresh above
+    # is now the mean squared distance over the overlap. Every candidate is
+    # logged as "[PGONode][loop] candidate ..." with these numbers; calibrate
+    # them on a replay.
+    loop_inlier_dist: 0.2
+    loop_min_overlap_ratio: 0.3
+    loop_min_inlier_ratio: 0.6
+    # Corridor degeneracy: min / max eigenvalue of GICP's x / y information.
+    # Logged as "xy info"; <= 0 = gate off until it has been calibrated.
+    loop_min_xy_info_ratio: 0.0
+    # A loop may move the keyframe by at most this fraction of the path
+    # driven between its two keyframes (floored at loop_search_radius).
+    # Point-LIO drifts well under 1 %; a loop between two look-alike places
+    # asks for their separation. <= 0 = off.
+    loop_max_drift_ratio: 0.05
+    # Radius candidates verified per search, the best inlier ratio wins.
+    loop_max_candidates: 3        # int
+    # Scan Context: a global candidate source for when the drift exceeds
+    # loop_search_radius, tried only when the radius search accepted nothing.
+    # Off until validated on replays of this site's maps: indoors, look-alike
+    # places are common and the drift gate is what keeps them out.
+    loop_sc_enabled: false
+    loop_sc_max_range: 20.0       # m, descriptor radius
+    loop_sc_dist_tresh: 0.2       # descriptor distance; lower = stricter
 
     # "Map so far" cloud published on pgo/map_cloud for the operator console
     # while mapping. Merged from every keyframe's *current*

@@ -12,10 +12,12 @@
 #include <small_gicp/pcl/pcl_registration.hpp>
 
 #include <string>
+#include <vector>
 
 #include "syncai_mapping/pgos/commons.h"
 #include "syncai_mapping/pgos/gravity_prior_factor.h"
 #include "syncai_mapping/pgos/planar_loop_factor.h"
+#include "syncai_mapping/pgos/scan_context.h"
 
 struct KeyPoseWithCloud
 {
@@ -24,7 +26,12 @@ struct KeyPoseWithCloud
   M3D r_global;
   V3D t_global;
   double time;
+  // Path length (m) from the first keyframe, along the LIO poses.
+  double travelled;
   CloudType::Ptr body_cloud;
+  // Only with loop_sc_enabled; built once at insertion from the LIO tilt.
+  ScanContext::Descriptor sc_desc;
+  Eigen::VectorXf sc_ring_key;
 };
 struct LoopPair
 {
@@ -112,6 +119,83 @@ struct PoseGraphOptimizerConfig
   int loop_submap_half_range = 5;
   double loop_submap_resolution = 0.1;
   double loop_search_period = 10.0;
+
+  // Robust kernel on every loop factor (Cartographer wraps its loop
+  // constraints in a Huber loss): "huber", "cauchy" or "none". Without one a
+  // single wrong loop that passed verification pulls the whole chain with a
+  // force that grows with its error. The scale is in whitened units (sigmas
+  // of the loop noise above): residuals below it are plain least squares.
+  // Huber is convex, so a correct loop still converges to the same answer,
+  // only in more iterations (smoothAndUpdate iterates until it settles). The
+  // scale must sit above where a correct loop ends up: with ~500 odometry
+  // edges the chain's own yaw sigma is ~1.3 deg, so an 8 deg loop with a
+  // 1.5 deg sigma settles at ~3 sigma; 5 leaves that untouched.
+  std::string loop_robust_kernel = "huber";
+  double loop_robust_kernel_scale = 5.0;
+
+  // Verification after GICP, on the aligned source against the target
+  // submap. A source point is in the OVERLAP when the submap has a point
+  // within loop_gicp_max_corr_dist, and an INLIER when that point is within
+  // loop_inlier_dist. The fork's fitness averaged over every source point,
+  // so the part of the scan the old submap never saw counted against a good
+  // loop as much as misalignment did. Now:
+  //  - overlap ratio (overlap / source) >= loop_min_overlap_ratio: enough of
+  //    the scan is shared to judge at all;
+  //  - inlier ratio (inliers / overlap) >= loop_min_inlier_ratio: the shared
+  //    part actually lines up (the normalised score Cartographer gates on);
+  //  - fitness = mean squared distance over the overlap <= loop_score_tresh.
+  double loop_inlier_dist = 0.2;
+  double loop_min_overlap_ratio = 0.3;
+  double loop_min_inlier_ratio = 0.6;
+  // Corridor degeneracy gate: smallest / largest eigenvalue of the GICP
+  // Hessian's world x / y translation block. A straight corridor constrains
+  // the across-corridor direction only, so a loop can slide along it with a
+  // perfect fitness. <= 0 = off (the ratio is still logged, to calibrate).
+  double loop_min_xy_info_ratio = 0.0;
+  // Drift plausibility gate: the xy correction a loop asks for must not
+  // exceed this fraction of the path travelled between its two keyframes
+  // (floored at loop_search_radius). Odometry drift grows with distance and
+  // Point-LIO's stays well under 1 %, while a loop between two similar but
+  // different places (symmetric corridors, the far side of a hall) asks for
+  // a jump of the order of their separation. Matters most for Scan Context,
+  // whose candidates do not depend on the current estimate; on a synthetic,
+  // 180-deg-symmetric hall it matched the opposite side 16-33 m away, after
+  // 50-90 m of travel, with an inlier ratio of 0.7-0.8. <= 0 = off.
+  double loop_max_drift_ratio = 0.05;
+  // How many radius-search candidates are verified per search (nearest
+  // first, at least one submap apart in keyframe index); the one with the
+  // best inlier ratio wins. 1 = the fork's "first candidate only".
+  int loop_max_candidates = 3;
+
+  // Scan Context, the global candidate source (see scan_context.h). Tried
+  // only when the radius search accepted nothing, so it matters after more
+  // drift than loop_search_radius. Its candidate is aligned coarse to fine
+  // like Cartographer's low- then high-resolution match: GICP on a submap
+  // voxelised at 3 x loop_submap_resolution with a 3 x larger
+  // correspondence distance first, then the normal verification.
+  bool loop_sc_enabled = false;
+  double loop_sc_max_range = 20.0;  // m, descriptor radius
+  double loop_sc_dist_tresh = 0.2;  // cosine distance, lower = stricter
+};
+
+// What happened to one loop candidate, for pgo_node's log. Filled by every
+// searchForLoopPairs(), accepted or not, so the thresholds can be calibrated
+// from a replay.
+struct LoopCandidateReport
+{
+  size_t target_id = 0;
+  size_t source_id = 0;
+  bool scan_context = false;  // false = radius search
+  double sc_dist = 0.0;       // only with scan_context
+  bool converged = false;
+  double fitness = 0.0;
+  double overlap_ratio = 0.0;
+  double inlier_ratio = 0.0;
+  double xy_info_ratio = 0.0;
+  double correction_m = 0.0;  // xy distance the loop moves the current keyframe
+  double allowed_m = 0.0;     // what the drift gate allowed
+  bool accepted = false;      // passed every gate (the best one becomes the loop)
+  const char * reject_reason = "";
 };
 
 class PoseGraphOptimizer
@@ -134,13 +218,11 @@ public:
   void smoothAndUpdate();
 
   CloudType::Ptr getSubMap(int idx, int half_range, double resolution);
-  // Registers source onto target with GICP. Returns false when it did not
-  // converge; fitness is pcl::Registration's getFitnessScore() (mean squared
-  // nearest-neighbour distance over all source points), which is what
-  // loop_score_tresh gates.
-  bool alignLoop(
-    const CloudType::Ptr & source, const CloudType::Ptr & target, M4F & transform,
-    double & fitness);
+  // Every candidate the last searchForLoopPairs() verified, accepted or not.
+  const std::vector<LoopCandidateReport> & lastCandidates() const { return m_last_candidates; }
+  // Extra iSAM2 update() steps the last smoothAndUpdate() took to settle a
+  // loop (0 without one).
+  int lastLoopIterations() const { return m_last_loop_iterations; }
   std::vector<std::pair<size_t, size_t>> & historyPairs() { return m_history_pairs; }
   std::vector<KeyPoseWithCloud> & keyPoses() { return m_key_poses; }
 
@@ -148,6 +230,29 @@ public:
   V3D offsetT() { return m_t_offset; }
 
 private:
+  // A keyframe to verify the current one against, and where to put the
+  // current keyframe's body cloud before GICP (its world pose for a radius
+  // candidate; a guess from the Scan Context yaw for a global one).
+  struct LoopCandidate
+  {
+    size_t target_id;
+    M3D r_init;
+    V3D t_init;
+    bool scan_context;
+    double sc_dist;
+  };
+
+  std::vector<LoopCandidate> radiusCandidates(size_t cur_idx);
+  bool scanContextCandidate(size_t cur_idx, LoopCandidate & candidate);
+  // GICP plus the overlap / inlier / degeneracy gates. On success writes the
+  // world-frame correction that moves the current keyframe from its graph
+  // pose to where the registration puts it.
+  bool verifyCandidate(
+    size_t cur_idx, const LoopCandidate & candidate, LoopCandidateReport & report,
+    M4D & correction);
+  LoopPair makeLoopPair(size_t cur_idx, size_t loop_idx, const M4D & correction, double score);
+  gtsam::SharedNoiseModel robustify(const gtsam::SharedNoiseModel & model) const;
+
   PoseGraphOptimizerConfig m_config;
   std::vector<KeyPoseWithCloud> m_key_poses;
   std::vector<std::pair<size_t, size_t>> m_history_pairs;
@@ -158,4 +263,8 @@ private:
   gtsam::Values m_initial_values;
   gtsam::NonlinearFactorGraph m_graph;
   small_gicp::RegistrationPCL<PointType, PointType> m_gicp;
+  // The coarse stage of a Scan Context candidate (see loop_sc_enabled).
+  small_gicp::RegistrationPCL<PointType, PointType> m_gicp_coarse;
+  std::vector<LoopCandidateReport> m_last_candidates;
+  int m_last_loop_iterations = 0;
 };

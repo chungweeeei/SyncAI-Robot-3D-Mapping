@@ -203,7 +203,7 @@ default silently.
 | `keyframe_delta_deg` / `keyframe_delta_m` | `10.0` / `0.5` | a new keyframe every 10° or 0.5 m |
 | `loop_search_radius` | `1.0` | m, radius for loop candidates |
 | `loop_time_tresh` | `60.0` | s, minimum age of a candidate |
-| `loop_score_tresh` | `0.15` | GICP fitness (m²) above this is rejected |
+| `loop_score_tresh` | `0.15` | mean squared distance (m²) over the overlap above this is rejected |
 | `loop_search_period` | `5.0` | s between loop searches |
 | `loop_submap_half_range` | `5` | **int**, keyframes on each side of the candidate |
 | `loop_submap_resolution` | `0.1` | m, voxel size of the GICP submap |
@@ -213,6 +213,14 @@ default silently.
 | `loop_noise_xy_sigma_m` / `loop_noise_yaw_sigma_deg` | `0.05` / `1.5` | planar loop sigmas; `<= 0` = use the fitness as variance |
 | `loop_noise_var_roll_pitch_z` | `0.01` | only with planar correction off |
 | `keyframe_tilt_sigma_deg` | `0.5` | holds each keyframe's roll / pitch to pointlio's; `<= 0` = off |
+| `loop_robust_kernel` / `loop_robust_kernel_scale` | `huber` / `5.0` | **string** `huber` / `cauchy` / `none`, scale in loop-noise sigmas |
+| `loop_inlier_dist` | `0.2` | m, an overlap point this close to the submap is an inlier |
+| `loop_min_overlap_ratio` / `loop_min_inlier_ratio` | `0.3` / `0.6` | overlap / source points, inliers / overlap points |
+| `loop_min_xy_info_ratio` | `0.0` | corridor degeneracy gate (GICP x / y information eigenvalue ratio); `<= 0` = off, still logged |
+| `loop_max_drift_ratio` | `0.05` | a loop may move the keyframe by at most this fraction of the path between its keyframes; `<= 0` = off |
+| `loop_max_candidates` | `3` | **int**, radius candidates verified per search |
+| `loop_sc_enabled` | `false` | Scan Context global candidates |
+| `loop_sc_max_range` / `loop_sc_dist_tresh` | `20.0` / `0.2` | m, descriptor radius / descriptor distance gate |
 | `map_cloud_resolution` | `0.2` | m, voxel size of the published map |
 | `map_cloud_pub_period` | `3.0` | s, minimum gap between map publishes |
 | `map_clean_enabled` | `true` | spawn `clean_map` after a save with patches |
@@ -227,24 +235,37 @@ default silently.
 | `map_clean_clip_below_floor` | `true` | stop rays at the floor |
 | `map_clean_nice` | `10` | **int**, the clean's nice value |
 
-Every value is a double unless marked int. **Write doubles with a decimal point** (`10.0`): a bare
+Every value is a double unless marked int or string (the `true` / `false` switches are bools). **Write doubles with a decimal point** (`10.0`): a bare
 `10` for a double, or `5.0` for an int, kills the node at startup.
 
 ### Loop verification
 
-A candidate (a past keyframe within `loop_search_radius`, at least `loop_time_tresh` old) is
-verified by GICP-registering the current keyframe onto an 11-keyframe submap around it.
+Each search (every keyframe, at most every `loop_search_period` after an accepted loop) collects
+candidates and GICP-registers the current keyframe onto an 11-keyframe submap around each:
 
-- **GICP with a 1 m correspondence distance.** The original PCL ICP (10 m) returned degrees of
-  false rotation on corridor loops, and its fitness could not tell good loops from bad.
-- **Planar loop edge.** A 6-DOF loop edge bent the chain and produced a double floor; the
+- **Radius candidates.** Past keyframes within `loop_search_radius` of the current estimate and at
+  least `loop_time_tresh` old, nearest first, up to `loop_max_candidates`, each more than a submap
+  apart. The one with the best inlier ratio wins.
+- **Scan Context** (`loop_sc_enabled`), only when no radius candidate passed. It compares
+  gravity-levelled scan descriptors instead of positions, so it finds a revisit after more drift
+  than the radius. Its yaw estimate seeds a coarse GICP (3× voxel, 3× correspondence distance)
+  before the normal one.
+- **Gates.** Over the overlap only (source points with a submap point within the 1 m
+  correspondence distance): overlap ratio, inlier ratio, mean squared distance; optionally the
+  corridor degeneracy ratio. Then the **drift gate**: the correction must be at most
+  `loop_max_drift_ratio` of the path driven since the target. Look-alike places (symmetric
+  corridors, the far side of a hall) align with a good inlier ratio but ask for a jump of their
+  separation; Scan Context only considers targets this gate could pass.
+- **Planar, robust loop edge.** A 6-DOF loop edge bent the chain and produced a double floor; the
   `PlanarLoopFactor` corrects only world x / y / yaw and leaves z / roll / pitch to the
-  gravity-aligned odometry.
-- **Logged.** Every accepted loop prints two `[PGONode][loop]` lines with the correction and the
-  keyframes' z before and after.
+  gravity-aligned odometry. It carries a Huber kernel, and the update iterates until the newest
+  keyframe settles.
+- **Logged.** Every candidate prints a `[PGONode][loop] candidate` line with its numbers and why
+  it was rejected; every accepted loop prints two more lines with the correction and the
+  keyframes' z before and after. Calibrate the gates from these on a replay.
 
-Known gap: the fitness gate counts all source points, so it still cannot reliably reject a bad
-corridor loop.
+`test/test_loop_closure.cpp` drives a synthetic, symmetric hall with drifting odometry through all
+of this (`LOOP_DEBUG=1` prints every candidate against the ground truth).
 
 ## Running
 
