@@ -110,10 +110,10 @@
     # between floor + floor_band and floor + dynamic_max_height) and the
     # "sparse" ones (hit by < sparse_min_hits keyframes, outside the floor
     # band: smear, edge returns, reflections). Progress and outcome:
-    # map_clean.recipe.json. The README's "Cleaning map.pcd" has the numbers.
+    # map_clean.recipe.json. The README's "Cleaning map.pcd" has the details.
     map_clean_enabled: true
     map_clean_voxel_size: 0.1        # voxel edge, m
-    map_clean_max_range: 20.0        # rays truncated here, m
+    map_clean_max_range: 20.0        # judging range, not the lidar's; farther points are kept, m
     map_clean_min_range: 0.5         # the robot's own body, m
     map_clean_lidar_height: 0.481    # keyframe z minus this is the floor, m
     map_clean_floor_band: 0.25       # +- m around the floor where neither rule applies

@@ -122,6 +122,9 @@ many **passed through** it (M), and rewrites `map.pcd` without two classes of po
   patches, no clean. `patches/` stay raw, so a rerun is idempotent.
 - **The floor band is exempt** from both rules (the floor is sampled thinly). The floor height is
   taken per level from nearby keyframes, within `floor_radius`.
+- **Only points within `max_range` (20 m) are judged.** Farther points are kept, not removed. A
+  larger value judges sparse, far returns and long, error-prone rays, which removes real
+  structure; people near the path are judged from closer keyframes anyway.
 - **Rays stop at the floor** (`clip_below_floor`), so reflections under a glossy floor do not
   carve away voxels below it.
 - **Output is PCD only**: `map.pcd` and the recipe. OctoMap is used only for voxel keys and ray
@@ -214,7 +217,7 @@ default silently.
 | `map_cloud_pub_period` | `3.0` | s, minimum gap between map publishes |
 | `map_clean_enabled` | `true` | spawn `clean_map` after a save with patches |
 | `map_clean_voxel_size` | `0.1` | m |
-| `map_clean_max_range` / `map_clean_min_range` | `20.0` / `0.5` | m, ray length / robot-body cut-off |
+| `map_clean_max_range` / `map_clean_min_range` | `20.0` / `0.5` | m, judging range / robot-body cut-off. Points outside are not judged and stay in `map.pcd`. `max_range` is not the lidar's range; keep it below it |
 | `map_clean_lidar_height` | `0.481` | m, lidar above the floor |
 | `map_clean_floor_band` | `0.25` | m, band around the floor exempt from both rules |
 | `map_clean_floor_radius` | `10.0` | m, keyframes within this set a cell's floor |

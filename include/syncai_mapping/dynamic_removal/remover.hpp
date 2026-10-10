@@ -6,7 +6,7 @@
 // or one-off returns, and map.pcd rewritten without their points. Run by
 // clean_map (dynamic_removal/main.cpp), which pgo_node spawns after a successful
 // save_maps with save_patches; the README's "Cleaning map.pcd" has the
-// process model and the numbers.
+// rules and the process model.
 //
 // Offline on purpose (decided 2026-10-09: the cleanest final map over a clean
 // live preview). A voxel is a person only once a LATER scan sees through it,
@@ -46,8 +46,14 @@ struct Params
 {
   // Voxel edge (m): the unit a point is judged in.
   double voxel_size = 0.1;
-  // Rays are truncated here (m): a point beyond it counts no hit, and the
-  // voxels its ray crosses past max_range count no miss.
+  // How far from the keyframe a point is judged (m). It is the judging range,
+  // not the lidar's (a Mid-360 reaches 40 m and more): a point beyond it
+  // counts no hit, and its ray counts misses only up to max_range. Such a
+  // point is NOT removed -- it stays in map.pcd unless a closer keyframe's
+  // scan classified its voxel. Kept below the sensor's reach on purpose: far
+  // returns are too sparse for the sparse rule (beam spacing outgrows a voxel)
+  // and long rays turn small angular error into misses through real
+  // structure; people are judged anyway from the keyframes that pass nearby.
   double max_range = 20.0;
   // Returns closer than this to the keyframe origin are ignored (m) -- the
   // robot's own body. They stay in map.pcd: nothing judged them.
