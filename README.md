@@ -1,107 +1,20 @@
 # SyncAI-Robot-3D-Mapping
 
-The ROS 2 package **`syncai_mapping`** (C++ / `rclcpp`, GTSAM, PCL, small_gicp, OctoMap), moved
-here from `SyncAI-Robot-Workspace`'s `feat/mapping-dynamic-removal` branch (`src/syncai_mapping`),
-plus a Docker environment for developing it on its own.
+The ROS 2 package **`syncai_mapping`** (C++17, `rclcpp`): SyncAI's mapping back end. The repo root
+is the package itself, pulled into SyncAI-Robot-Workspace with vcstool as `src/syncai_mapping`.
 
-**This repo is itself a single colcon package** (`package.xml` / `CMakeLists.txt` at the root). The
-package name, executables, node names, topics and services are unchanged from the Workspace copy, so
-the Workspace can pull this repo with vcstool as `src/syncai_mapping`, the same way it pulls
-SyncAI-Robot-State. The parameters are not quite unchanged; see the next section.
+It has two executables:
 
-## Differences from the Workspace copy
-
-Every place this repo knowingly deviates from `src/syncai_mapping` in SyncAI-Robot-Workspace. Keep
-this list complete: it is the checklist for switching the Workspace over to this repo, and the
-Workspace's in-tree copy (with its own params file) has to go at the same time.
-
-- **`cloud_topic`, `odom_topic`, `lio_reset_service`, `local_frame` and `map_frame` are no longer
-  parameters.** `pgo_node` derives `/<robot_id>/pointlio/{body_cloud_dense,lio_odom,reset}` and
-  `<robot_id>/pointlio_odom` from running at `/<robot_id>/pgo`, and `map_frame` is always `map`.
-  `mapping.launch.py` no longer passes them, and the node must run at `/<robot_id>/pgo`. Setting
-  them in a params file or a launch override has no effect.
-- **`loop_registration` is gone**: loops are always verified with GICP; the fork's PCL ICP backend
-  was removed. A `loop_registration` key is ignored.
-- **Renamed parameters.** A params file that still sets an old key is silently ignored and the
-  node uses the default; rename the key.
-
-  | Workspace copy | Here |
-  |---|---|
-  | `key_pose_delta_deg` | `keyframe_delta_deg` |
-  | `key_pose_delta_trans` | `keyframe_delta_m` |
-  | `loop_icp_max_corr_dist` | `loop_gicp_max_corr_dist` |
-  | `submap_resolution` | `loop_submap_resolution` |
-  | `min_loop_detect_duration` | `loop_search_period` |
-  | `map_clean_resolution` | `map_clean_voxel_size` |
-  | `map_clean_max_height` | `map_clean_dynamic_max_height` |
-  | `map_clean_min_hits` | `map_clean_sparse_min_hits` |
-
-  The three map-cleaning renames carry through to `clean_map`'s flags (`--voxel-size`,
-  `--dynamic-max-height`, `--sparse-min-hits`; the old flags are a usage error) and to the keys
-  of `map_clean.recipe.json`'s `"params"` object (`voxel_size`, `dynamic_max_height`,
-  `sparse_min_hits`), so a reader of those keys has to switch too.
-- The accepted-loop log line reads `GICP moves source by` (was `ICP moves source by`); anything
-  that greps the log for it needs the new text.
-- `map_clean.recipe.json` is written with nlohmann/json instead of by hand. Same fields (apart
-  from the renames above), order and values, but every double-typed parameter now always carries
-  a decimal point: `"max_range":20.0` where it was `20` (also `dynamic_max_height`,
-  `floor_radius`, `dynamic_miss_ratio`). A reader that
-  type-checks those (Python's `json` turns `20` into `int`, `20.0` into `float`) sees a float.
-  The `map_cloud_file` notice is byte-for-byte the same format.
-- Internal only, no effect on the ROS interface: `SimplePGO` is `PoseGraphOptimizer`
-  (`pgos/pose_graph_optimizer.*`), its `Config` is `PoseGraphOptimizerConfig`,
-  `src/pgo_main.cpp` is `src/main.cpp`, and the map cleaning lives in `dynamic_removal/`:
-  `map_cleaner.*` is `dynamic_removal/remover.*` (namespace `dynamic_removal`),
-  `map_clean_recipe.*` is `dynamic_removal/recipe.*` (`dynamic_removal::recipe`) and
-  `clean_map_main.cpp` is `dynamic_removal/main.cpp`. The executable is still `clean_map`, and
-  the `map_clean_*` parameters and `map_clean.recipe.json` keep their names.
-
-## Development environment
-
-Everything is built inside the Dev Container (`syncai-robot-3d-mapping`): open the repo in VS Code
-and choose **Reopen in Container**, or run `devcontainer up --workspace-folder .`. The image is ROS 2
-Humble with PCL and OctoMap from apt, and GTSAM 4.2.0 source-built with the same flags as the
-Workspace image. The first build compiles GTSAM and takes a while.
-
-Inside the container `/workspace` is a colcon workspace (named volume), this repo is mounted at
-`/workspace/src/syncai_mapping`, and `postCreateCommand` vcs-imports `dependencies.repos`
-(`syncai_common` and `small_gicp`) next to it.
-
-```bash
-cd /workspace
-vcs import --skip-existing < src/syncai_mapping/dependencies.repos   # if not imported yet
-colcon build --symlink-install --cmake-args -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-source install/setup.bash
-colcon test --packages-select syncai_mapping && colcon test-result --test-result-base build/syncai_mapping --verbose
-```
-
-CI (`.github/workflows/ci.yml`) builds the same image and runs `.github/scripts/ci.sh`.
-
-The container uses the host network with `ROS_DOMAIN_ID=2`, the same as the other SyncAI dev
-containers. Use `export ROS_DOMAIN_ID=77` when testing with a bag so nothing reaches a real robot.
-
-Paths in the package documentation below (`~/robot_ws`, `config/system.ini`, `map/<name>`,
-`start_mapping.yaml`) refer to the robot's SyncAI-Robot-Workspace deployment, where this package
-runs.
-
----
-
-# syncai_mapping
-
-The mapping back end: one node and a post-save job. `pgo_node` is a pose graph over `syncai_pointlio`'s odometry and body clouds. It picks keyframes, detects and verifies loop
-closures, smooths the graph with GTSAM iSAM2, broadcasts the resulting
-`map → <robot_id>/pointlio_odom` correction while a map is being built, hands
-the "map so far" to the operator console, and serves the three calls that
-bracket a mapping run: `start_mapping`, `save_maps` and `reset_mapping`. It
-comes up **idle** — nothing is banked until `start_mapping`, and a successful
-`save_maps` ends the run — and reports that state on `mapping_status`. It
-runs only in the mapping session; in navigation `syncai_localizer` owns the
-same TF. After a successful save it spawns `clean_map`, this package's second
-executable, which rewrites the saved `map.pcd` without people and one-off
-returns — detached, so it outlives the session (see "Cleaning map.pcd").
+- **`pgo_node`**: a pose graph over `syncai_pointlio`'s odometry and dense body clouds. It picks
+  keyframes, closes loops (small_gicp GICP + GTSAM iSAM2), broadcasts the
+  `map → <robot_id>/pointlio_odom` correction, streams the "map so far" to the operator console,
+  and serves `start_mapping`, `save_maps` and `reset_mapping`. It runs only in the mapping
+  session; in navigation `syncai_localizer` owns the same TF.
+- **`clean_map`**: a detached job `pgo_node` starts after each save. It rewrites the saved
+  `map.pcd` without people and one-off returns.
 
 ```
-   syncai_pointlio            /<id>/pointlio/{body_cloud, lio_odom}
+   syncai_pointlio            /<id>/pointlio/{body_cloud_dense, lio_odom}
         │                           │  (ApproximateTime sync)
         │ reset ◄────── ResetLIO ───┤
         │                           ▼
@@ -111,238 +24,118 @@ returns — detached, so it outlives the session (see "Cleaning map.pcd").
         │                ┌──────────┼──────────────┬────────────────┬──────────────┐
         │                ▼          ▼              ▼                ▼              ▼
         │          map_cloud   map_cloud_file  save_maps      start_mapping   mapping_status
-        │          (rviz)      JSON notice ──► /dev/shm/…   map/<name>/    reset_mapping   IDLE / MAPPING /
-        │                      (backend: live preview)     map.pcd, patches/, poses.txt   RESETTING (latched)
-        │                                                  (ends the run)  (backend: "Start" / "New map")
+        │          (rviz)      JSON notice ──► map/<name>/    reset_mapping   IDLE / MAPPING /
+        │                      /dev/shm/…      (ends the run)                 RESETTING
+        │                      (backend preview)    │
+        │                                           ▼
+        │                                       clean_map ──► map.pcd (cleaned)
 ```
 
-Ported into the workspace from `SyncAI-Fast-LIO2`'s `pgo` package in 2026-09
-(`hba` came over in the same month as this package's second node and was
-removed in 2026-10 — nothing called it, and it was the package's only Sophus
-consumer; `git log -- src/syncai_mapping/src/hba_node.cpp` has it. The
-`localizer` came last, as `syncai_localizer`; the fork is no longer imported).
-The ROS surface did not change with the move — same node name, namespace,
-services, topics, TF, hand-off directory and on-disk layout — so no consumer
-had to. Two things did change: the two service **types** are
-`syncai_common/srv/SaveMaps` and `ResetMapping` now (the backend, their only
-caller, builds against that package and had to switch its imports), and
-configuration is declared ROS parameters instead of a yaml-cpp `config_path`.
-`pgos/` is the ported graph (`pose_graph_optimizer.*`, `commons.*`, upstream lineage,
-MIT); `pgo_node.*` is the ROS shell; `dynamic_removal/` is the post-save map cleaning
-(`clean_map`).
+Source layout: `src/pgos/` is the pose graph (upstream-derived, MIT), `src/pgo_node.cpp` is the
+ROS node, and `src/dynamic_removal/` is `clean_map`.
+
+Paths below such as `~/robot_ws`, `config/system.ini` and `map/<name>` refer to the robot's
+SyncAI-Robot-Workspace deployment.
 
 ## Inputs
 
-| Input | Kind | Source | Used for |
-|---|---|---|---|
-| `/<robot_id>/pointlio/body_cloud_dense` | `sensor_msgs/PointCloud2`, depth 10 | `syncai_pointlio` | The keyframe's body-frame scan: deskewed, 3× `body_cloud`'s points (2026-10; it was `body_cloud` before). Only x / y / z / intensity are read. The density is what lets `clean_map` tell people from structure. |
-| `/<robot_id>/pointlio/lio_odom` | `nav_msgs/Odometry`, depth 10 | `syncai_pointlio` | The keyframe's pose in `local_frame` |
+| Topic | Type | Use |
+|---|---|---|
+| `/<robot_id>/pointlio/body_cloud_dense` | `sensor_msgs/PointCloud2` | the keyframe scan, body frame (x / y / z / intensity) |
+| `/<robot_id>/pointlio/lio_odom` | `nav_msgs/Odometry` | the keyframe pose in `<robot_id>/pointlio_odom` |
 
-The two are joined by a `message_filters` `ApproximateTime` synchroniser
-(queue 10, age penalty 0.1) into one cloud+pose pair per lidar frame. The
-names are **fixed, not parameters**: the node derives them, the LIO reset
-client `/<robot_id>/pointlio/reset` and its `local_frame`
-`<robot_id>/pointlio_odom` from its own namespace, because pointlio runs at
-`/<robot_id>/pointlio`, the sibling of `/<robot_id>/pgo`. They are absolute,
-since a relative name from inside `/<robot_id>/pgo` cannot reach pointlio's
-namespace. The node logs the resolved names at startup, so a bare run
-(subscribing to `/pointlio/…`, which nothing publishes) shows up in the log
-rather than as silence.
+These names, the LIO reset client `/<robot_id>/pointlio/reset` and the frames are **not
+parameters**. The node derives them from its own namespace (`/<robot_id>/pgo`), so it must run
+there. It logs the resolved names at startup.
 
-The synchroniser keeps only the **newest** pair in a single slot (an older
-untaken one is overwritten), and a 50 ms timer takes it; under load the graph
-skips whole frames rather than queueing them. The cloud is decoded
-(`pcl::fromROSMsg`) only when that pair turns out to be a keyframe. Nothing reaches the graph unless the node is MAPPING (see
-"The run lifecycle"): idle, it drops every pair before the copy and only
-re-broadcasts an identity `map → local_frame`, so the console's live scan —
-which looks that transform up — stays visible while the operator positions
-the robot before Start.
+The two topics are paired by an `ApproximateTime` synchroniser. Only the newest pair is kept, and a
+50 ms timer takes it: under load whole frames are skipped rather than queued. While the node is
+idle, pairs are dropped and an identity `map → local_frame` is broadcast so the console's live scan
+stays visible.
 
 ## Outputs
 
-All relative to `/<robot_id>/pgo/` except the TF.
+All under `/<robot_id>/pgo/` except the TF.
 
-| Output | Type / QoS | Notes |
+| Output | Type | Notes |
 |---|---|---|
-| TF `map → local_frame` | `<robot_id>/pointlio_odom` | The loop-closure correction, rebroadcast from the timer on every pair (keyframe or not). `local_frame` **must equal pointlio's `world_frame`** — this node does not adopt the frame from the odometry header (the localizer does), so a mismatch lands the correction on a frame nobody looks up. |
-| `map_cloud` | `PointCloud2`, depth 1 | The "map so far", every keyframe placed with its *current* corrected pose and voxelised at `map_cloud_resolution`. For rviz and `ros2 topic echo` only: see the hand-off below for why the console does not read it. |
-| `map_cloud_file` | `std_msgs/String`, RELIABLE + TRANSIENT_LOCAL, depth 1 | A ~200 B JSON notice naming the same merge as a PCD file. What the backend reads. |
-| `loop_markers` | `MarkerArray`, depth 10000 | Loop-closure nodes and edges for rviz. Subscriber-gated. |
-| `mapping_status` | `syncai_common/msg/MappingStatus`, RELIABLE + TRANSIENT_LOCAL, depth 1 | The run state (`IDLE` / `MAPPING` / `RESETTING`) with the keyframe and loop-closure counts; on every transition and at 1 Hz. What the backend's `GET /api/v1/mapping` answers from. |
-| `start_mapping` | `syncai_common/srv/StartMapping` | Begin a run (IDLE → MAPPING) — see "The run lifecycle". |
-| `save_maps` | `syncai_common/srv/SaveMaps` | Serialise the keyframes and end the run (MAPPING → IDLE) — see below. |
-| `reset_mapping` | `syncai_common/srv/ResetMapping` | Start a new map in place (MAPPING → MAPPING) — see below. |
+| TF `map → <robot_id>/pointlio_odom` | | the loop-closure correction, on every pair |
+| `map_cloud` | `PointCloud2` | the "map so far" for rviz |
+| `map_cloud_file` | `std_msgs/String`, reliable + transient local | JSON notice naming the same map as a PCD file; what the backend reads |
+| `loop_markers` | `MarkerArray` | loop nodes and edges for rviz |
+| `mapping_status` | `syncai_common/msg/MappingStatus`, reliable + transient local | `IDLE` / `MAPPING` / `RESETTING` plus keyframe and loop counts |
+| `start_mapping` | `syncai_common/srv/StartMapping` | begin a run |
+| `save_maps` | `syncai_common/srv/SaveMaps` | write the map and end the run |
+| `reset_mapping` | `syncai_common/srv/ResetMapping` | discard the run and start over |
 
-Both cloud outputs are keyframe-triggered, subscriber-gated and rate-floored at
-`map_cloud_pub_period` (3 s); with nobody listening on either, no merge runs.
+Both map outputs are published only when someone subscribes, after a new keyframe, and at most
+every `map_cloud_pub_period` (3 s).
 
-### The map-cloud file hand-off
+### Map-cloud file hand-off
 
-`map_cloud` stays for rviz, but the console's backend reads `map_cloud_file`
-instead. A large site's merge is 16-45 MB, and CycloneDDS over UDP on `lo`
-cannot deliver that through the kernel's default 208 KB socket buffer
-(`net.core.rmem_max`): fragments drop, a BEST_EFFORT reader loses every
-sample, and the console's preview used to stop once the map grew.
-
-So the worker writes the merge as a binary PCD to
-`<map_cloud_dir>/map_cloud_<seq>.pcd` (`.tmp` + rename, so a reader never sees
-a partial file), keeps the newest two by `seq`, and publishes a notice with
-exactly five fields:
+A large map is 16–45 MB, too big to deliver reliably over DDS on `lo`. So the node writes it as a
+binary PCD to `<map_cloud_dir>/map_cloud_<seq>.pcd` (keeping the newest two) and publishes a small
+notice:
 
 ```json
 {"seq":12,"path":"/dev/shm/syncai_pgo/robot01/map_cloud_12.pcd","points":1830412,"frame_id":"map","stamp":{"sec":1727,"nanosec":0}}
 ```
 
-Written with nlohmann/json (`ordered_json`, so the fields keep this order). The reader
-must subscribe TRANSIENT_LOCAL, or nothing is replayed to a backend
-(re)started mid-run. `map_cloud_dir` is `/dev/shm/syncai_pgo/<robot_id>` (the
-launch appends the robot_id): the host's tmpfs, which the backend's container
-sees at the same path only because **both compose services run `ipc: host`**
-— without it the notices arrive and every read is ENOENT, and a private
-`/dev/shm` is 64 MB, too small for two merges of a large site. A directory the
-node cannot create disables the file output for the run and logs an error;
-it is deliberately not fatal, because this node also owns the TF broadcast.
-
-**An empty map is a message, not a non-event.** `reset_mapping`,
-`start_mapping` and a successful `save_maps` all publish an empty
-`PointCloud2` and a `"points":0,"path":""` notice, ungated and *before* the
-files are removed; a consumer that skips it keeps showing the map the
-operator was just told had been discarded — or, after a save, the map that is
-now on disk and no longer live. The save is also what empties
-`/dev/shm/syncai_pgo/<robot_id>`: nothing else deletes those files until the
-next run, and the backend never does.
+- `map_cloud_dir` is `/dev/shm/syncai_pgo/<robot_id>`. The backend can read it only if **both
+  compose services run with `ipc: host`**.
+- Subscribe transient local, or a restarted backend misses the latest notice.
+- Start, reset and a successful save publish an empty map (`"points":0,"path":""`). Consumers must
+  clear their view on it.
+- If the directory cannot be created, only the file output is disabled; the node keeps running.
 
 ### `save_maps`
 
-`file_path` must be an existing directory. Into it the node writes:
+`file_path` must be an existing directory. The node writes:
 
 | File | Content |
 |---|---|
-| `map.pcd` | Every keyframe's body cloud placed with its loop-closure-corrected global pose and concatenated. Binary, **not** voxel-filtered. **Replaced minutes later** by `clean_map`'s copy without people and one-off returns (with `save_patches` and `map_clean_enabled`) — see "Cleaning map.pcd". |
-| `patches/<i>.pcd` | (with `save_patches`) one body-frame cloud per keyframe; the directory is removed and recreated |
-| `poses.txt` | (with `save_patches`) one line per keyframe, `<i>.pcd tx ty tz qw qx qy qz`, bare basenames |
-| `map_clean.recipe.json` | (with `save_patches` and `map_clean_enabled`) the cleaning's status, written `converting` before the response goes out |
+| `map.pcd` | all keyframes in their corrected global poses, binary, not voxel-filtered; later replaced by `clean_map`'s output |
+| `patches/<i>.pcd` | (with `save_patches`) one body-frame cloud per keyframe |
+| `poses.txt` | (with `save_patches`) `<i>.pcd tx ty tz qw qx qy qz` per keyframe |
+| `map_clean.recipe.json` | (with `save_patches` and `map_clean_enabled`) the cleaning status |
 
-A save with `save_patches` also stops a `clean_map` still running on the same
-directory (SIGTERM) and deletes the previous `map_clean.recipe.json` and any
-`map.pcd.tmp` first: their input is being replaced.
+No file names the map or holds an absolute path, so a map directory can be renamed freely.
 
-That layout is what the workspace's map catalogue expects under `map/<name>/`. Nothing written names the map or holds an
-absolute path, which is what makes renaming a map directory one `os.rename`;
-keep it that way. The handler holds `m_pgo_mutex` for its whole body, so a
-reset that arrives during a save waits for it (and then finds the node idle
-and is refused).
-
-**A successful save ends the run.** Once `map.pcd` is written the node goes
-IDLE: it frees the keyframes (the map is on disk; a long drive holds hundreds
-of MB of them), publishes the empty map — which is what clears `/dev/shm` and
-the console's "map so far" — and waits for the next `start_mapping`. Saving
-the same run twice is therefore not possible; the backend converts from
-`map.pcd` and never needed it. A save that fails (missing directory, no
-keyframes, a write error) changes nothing; the write errors are caught and
-reported as `success: false` with the run kept — they used to throw out of
-the callback. `poses.txt` is now only opened when `save_patches` is true.
-
-`pgo_node` holds its keyframes in RAM and this is the **only** thing that
-writes them out. Whatever has not been saved when the process ends — or when
-`reset_mapping` runs — is gone short of replaying a bag. That is why the
-mapping session's `lio` window is not optional, and why a mode switch refuses
-to rebuild the live mode.
+**A successful save ends the run**: the node frees the keyframes, publishes the empty map and goes
+`IDLE`. A failed save changes nothing. Keyframes live only in RAM, so anything not saved before
+the process exits or a reset is lost.
 
 ### Cleaning map.pcd
 
-Once a save has ended the run, the handler spawns one `clean_map` on the
-directory it just wrote. It counts, per 0.1 m voxel that some keyframe's
-return ended in, how many keyframes **hit** it (H) and how many keyframes'
-rays **passed through** it (M) — per scan, never per ray — and rewrites
-`map.pcd` without the points of two classes:
+After a save with patches, `pgo_node` spawns `clean_map` on the saved directory. It ray-casts every
+keyframe through 0.1 m voxels, counting for each voxel how many keyframes **hit** it (H) and how
+many **passed through** it (M), and rewrites `map.pcd` without two classes of points:
 
-| Class | Rule | What it catches |
+| Class | Rule | Catches |
 |---|---|---|
-| dynamic | `M >= dynamic_min_miss` (3), `M >= dynamic_miss_ratio × H` (2.0), between floor + `floor_band` and floor + `dynamic_max_height` | people: hit by a keyframe or two, seen through by the rest |
-| sparse | `H < sparse_min_hits` (2), not within ±`floor_band` of the floor | smear, edge returns, reflections: 92 % of the occupied voxels outside one solid corridor wall were single-keyframe; real wall voxels have a median of 4–5 |
+| dynamic | `M >= dynamic_min_miss` (3) and `M >= dynamic_miss_ratio × H` (2.0), between floor + `floor_band` and floor + `dynamic_max_height` | people |
+| sparse | `H < sparse_min_hits` (2), outside the floor band | smear, edge returns, reflections |
 
-**Offline on purpose** (decided 2026-10-09: the cleanest final map over a
-clean live preview). A voxel is a person only once a later scan sees through
-it — often from another angle, often on a revisit — and the judgement needs
-the final, loop-closed poses: before closure the two passes of `dp1f_1008_2`'s
-east corridor were 1.2–2 m apart, and an online check on those poses would
-have deleted real wall at every revisit. An online, windowed filter here
-(Removert / DUFOMap style) and a synchronous clean inside `saveMapsCB` were
-both rejected. The costs, accepted: `map.pcd` is the raw save for the minutes
-the clean runs, the live preview still shows people, and a clean that fails
-or is killed leaves the raw map.
+- **Offline on purpose.** A person shows up only once a later scan sees through them, and the
+  judgement needs the final loop-closed poses. Until the clean finishes, `map.pcd` is the raw save.
+- **Input is `patches/` + `poses.txt`**, not `map.pcd`, because rays need each scan's origin. No
+  patches, no clean. `patches/` stay raw, so a rerun is idempotent.
+- **The floor band is exempt** from both rules (the floor is sampled thinly). The floor height is
+  taken per level from nearby keyframes, within `floor_radius`.
+- **Rays stop at the floor** (`clip_below_floor`), so reflections under a glossy floor do not
+  carve away voxels below it.
+- **Output is PCD only**: `map.pcd` and the recipe. OctoMap is used only for voxel keys and ray
+  traversal; no octree or OctoMap file is produced.
+- **Process model.** A detached child process (`posix_spawn`, own session, `nice`), so it survives
+  a mode switch and the OOM killer picks it before `pgo_node`. One clean runs per host (a `flock` on
+  `/dev/shm/syncai_pgo/clean_map.lock`). A new save into the same directory stops the old clean.
 
-**Details that matter:**
+**Status** is `map_clean.recipe.json`: `converting` → `ok` / `failed`, with `started_at`,
+`finished_at`, the `params` used and, on `ok`, the `measurements`. A hard kill leaves it at
+`converting` with the raw map. **A 2D map made while it says `converting` came from the raw map**;
+redo it once it reads `ok`.
 
-- *Input: patches + poses, not `map.pcd`.* Seeing through a voxel needs each
-  scan's origin, which only `poses.txt` gives. No clean without
-  `save_patches`. `patches/` stay raw; a rerun re-derives the cleaned map.
-- *The floor band is exempt from both rules.* The lidar samples the floor
-  thinly (12 % of a keyframe's points), so a single hit is the norm there —
-  the sparse rule took 17 % of a corridor floor before the exemption — and
-  rays grazing the floor count misses against real floor voxels.
-- *The local floor is per level.* A voxel's floor is taken from the
-  keyframes whose floor is at or below it, the highest such level, the
-  nearest in xy within `floor_radius`. The xy-nearest keyframe alone gave 1F
-  under 2F the 2F floor.
-- *Rays stop at the floor* (`clip_below_floor`). 0.4 % of the returns land
-  below the floor — long range, half the usual intensity: reflections off a
-  glossy floor. Their rays are cut at keyframe floor − (`floor_band` −
-  `voxel_size`) so they count no misses under the floor; the returns still
-  count toward `sparse_min_hits`, so a one-off reflection leaves the map and a lower
-  level seen from many keyframes stays.
-- *Thin static structure* (a handrail, a chair leg) has the person signature.
-  On the stairs of `dp1f_1008_2` 5–7 % of the points went at every height,
-  handrail height included, so nothing was singled out; still, measure
-  `dynamic_voxels` and look before tightening the ratio.
-- *It needs the dense input.* On the old 2,640-point `body_cloud` keyframes
-  the same rules removed 31 % of the map and 10–24 % of the walls.
-
-**Numbers** (`dp1f_1008_2`, 2004 dense keyframes, 15.4 M points):
-
-| Region (east corridor unless noted) | `map.pcd` points kept |
-|---|---|
-| corridor interior at person height | 12 % |
-| left / right wall | 91 % / 94 % |
-| outside the left wall (noise) | 71 % |
-| outside the right wall (real structure) | 92 % |
-| floor | 100 % |
-| stairs: treads / whole stairwell | 98.6 % / 94 % |
-| whole map | 1.2 M points removed |
-
-2 min 10 s and 1.0 GB peak on the Mac replay container (no octree is built:
-OctoMap is used only for its voxel keys and ray traversal, and no OctoMap file
-is produced; the clean's only outputs are `map.pcd` and the recipe). With both rules
-off the rewritten `map.pcd` matches pgo's point for point (0.1 mm, from
-`poses.txt`'s 6 significant digits).
-
-**Process model.** A child process, not a thread: the hit-voxel map is
-hundreds of MB that this node's heap would keep, the OOM killer must pick the
-clean (it writes `oom_score_adj 500`) rather than the TF-owning node, and it
-must survive `switch_mode`, which kills the mapping session — saving and
-switching straight to AUTO is the normal flow. `posix_spawn` of
-`<prefix>/lib/syncai_mapping/clean_map` with `POSIX_SPAWN_SETSID`, stop
-signals reset, nice `map_clean_nice`; one at a time per host through a
-`flock` on `/dev/shm/syncai_pgo/clean_map.lock`. This node reaps it from the
-1 s status timer; its destructor neither kills nor waits. The robot service
-runs with `init: true` so a clean orphaned by a mode switch is reaped too.
-A second save into the same directory SIGTERMs the running clean, and every
-clean fingerprints `poses.txt` (device, inode, size, mtime) and re-checks it
-before the rename, failing as `superseded` instead of putting the old save's
-map over the new one.
-
-**Status: `map_clean.recipe.json`**, the only surface: `converting` (written
-by this node before the save responds, again by the clean once it has the
-lock) → `ok` / `failed`, with `started_at`, `finished_at`, the `params` in
-force and, on `ok`, the `measurements` (`dynamic_voxels`, `sparse_voxels`,
-`clipped_rays`, `map_points_removed`, `map_points_kept`, `elapsed_s`, …).
-A hard kill leaves it at `converting` with the raw `map.pcd` in place: age it
-out by `started_at`. **A gridmap converted while it says `converting` was
-made from the raw map**; redo it when it flips to `ok`.
-
-**By hand** — a re-clean of any save with patches; it always starts from the
-patches, so it is idempotent:
+Run by hand to re-clean any save with patches:
 
 ```bash
 ros2 run syncai_mapping clean_map map/<name>
@@ -354,289 +147,151 @@ ros2 run syncai_mapping clean_map map/<name> --lock none --dynamic-min-miss 0   
 cat map/<name>/map_clean.recipe.json
 ```
 
-### The run lifecycle
+### Run lifecycle
 
-Since 2026-10 the node has an explicit run state, `NodeState::phase`, one of
-`syncai_common/msg/MappingStatus`'s constants and latched on
-`mapping_status`:
+The node starts `IDLE` (or `MAPPING` with `start_on_launch`) and reports its state on
+`mapping_status`.
 
-| State | Event | Next | What happens |
-|---|---|---|---|
-| — | launch | `IDLE` (`MAPPING` with `start_on_launch`) | `/dev/shm` cleared, status published |
-| `IDLE` | a cloud/odom pair | `IDLE` | dropped before the copy; identity `map → local_frame` broadcast |
-| `IDLE` | `start_mapping` | `RESETTING` → `MAPPING` | the four phases below, from the other precondition |
-| `IDLE` | `reset_mapping` / `save_maps` | `IDLE` | refused: nothing to discard / nothing to save |
-| `MAPPING` | a pair | `MAPPING` | the normal path |
-| `MAPPING` | `reset_mapping` | `RESETTING` → `MAPPING` | discard and start over, as always |
-| `MAPPING` | `start_mapping` | `MAPPING` | refused: "already mapping" — a stale console tab must not be able to discard a run with the wrong button |
-| `MAPPING` | `save_maps` succeeds | `IDLE` | files written, keyframes freed, empty map published, `/dev/shm` cleared |
-| `MAPPING` | `save_maps` fails | `MAPPING` | nothing changes |
-| `RESETTING` | anything | `RESETTING` | pairs dropped silently; every service refused ("a start or reset is already running") |
+| State | Event | Next |
+|---|---|---|
+| `IDLE` | `start_mapping` | `RESETTING` → `MAPPING` |
+| `IDLE` | `reset_mapping` / `save_maps` | refused |
+| `MAPPING` | `reset_mapping` | `RESETTING` → `MAPPING` |
+| `MAPPING` | `start_mapping` | refused ("already mapping") |
+| `MAPPING` | `save_maps` succeeds / fails | `IDLE` / `MAPPING` |
+| `RESETTING` | anything | pairs dropped, services refused |
 
-A failed start or reset puts the phase it left back. The graph itself is never
-in a half state: the only fallible step runs before anything is destroyed.
+Start and reset share one sequence:
 
-`start_mapping` and `reset_mapping` share one body (`beginRun`), four phases
-ordered so that the only step that can fail runs before anything is
-destroyed:
+1. **Pause**: check the precondition and switch to `RESETTING`, so no pair reaches the graph.
+2. **Reset pointlio** (`reset_lio: true`): call `ResetLIO` and wait up to 5 s. On failure, nothing
+   has changed yet and the call returns an error.
+3. **Rebuild**: replace the pose graph with a fresh one, publish the empty map, switch to
+   `MAPPING`.
+4. **Resume**: drop pairs stamped at or before pointlio's last old odometry, so the old run's tail
+   cannot leak in.
 
-1. **Pause.** Under a brief `m_pgo_mutex` hold the precondition is checked
-   (IDLE for a start, MAPPING for a reset — exact, because the save stores
-   IDLE under the same mutex) and the phase goes `RESETTING`: nothing the
-   front end publishes can reach the graph while pointlio's state changes
-   underneath. This is the whole ordering fix — no sleep, no slack window;
-   the odometry discontinuity has nowhere to land. A second concurrent call
-   is rejected outright (`m_transitioning`), and an RAII guard puts the
-   previous phase back on every early exit.
-2. **Reset the front end** (`reset_lio: true`, what the console sends): call
-   `pointlio/reset` over `syncai_common/srv/ResetLIO` and wait up to 5 s,
-   **without** `m_pgo_mutex`, so the TF broadcast does not gap. The LIO answers
-   with `last_odom_time`, the lidar stamp of the last odometry of the old run.
-   Any failure returns here with the state intact and says so.
-3. **Rebuild the graph** under the mutex (`stopRunLocked`, shared with the
-   save): join an in-flight merge (so the old map cannot be published after
-   the empty one), construct a fresh `PoseGraphOptimizer` (the constructor *is* the
-   reset — `gtsam::ISAM2` has no clear), swap the buffer, zero the counters,
-   publish the empty map and a DELETEALL for the markers; then set
-   `accept_after_time` and the phase `MAPPING`.
-4. **Resume.** Pairs stamped `<= accept_after_time` — the old run's tail still
-   sitting in the synchroniser — are dropped by `syncCB`. With a LIO reset
-   that boundary is `last_odom_time`; a start without one gates on the last
-   pair seen, so the run begins at the call; a reset without one keeps its
-   historical `0.0`. Both sides of the comparison are the lidar header stamp,
-   so it is exact.
-
-**Why a start is a reset.** The graph's origin is the odometry origin
-(`PoseGraphOptimizer` anchors its first keyframe at `offset × local pose`), so "begin
-a clean run from where the robot stands" is literally true only when pointlio
-is reset too — which also frees the ikd-tree it has been growing since the
-session came up.
-
-**The robot must be standing still** for either. pointlio re-runs a static,
-gravity-aligning IMU initialisation after its reset — publishing nothing until
-it is done, so the live scan goes dark for those seconds and returns; one done
-in motion tilts the new map for its whole life and reports no error anywhere.
-Nothing in either node enforces that, by decision (a stationarity check
-cannot tell a still robot from a vibrating one). Both response `message`s are
-written as UI copy for exactly that reason — they are the last place the
-warning can land.
-
-`reset_lio: false` resets the graph alone over an unchanged odometry stream: a
-bag-replay affordance, not something the console sends. The `.srv` comments in
-`syncai_common` (`StartMapping.srv`, `ResetMapping.srv`, `ResetLIO.srv`) and
-`MappingStatus.msg` are the specification.
+**The robot must stand still** for start and reset: pointlio re-runs its gravity-aligning IMU
+initialisation, and doing that in motion tilts the whole map without any error. Nothing enforces
+this, so the service responses say it. `reset_lio: false` resets only the graph, for bag replay.
 
 ### Threading
 
-`src/main.cpp` (pgo_node's) runs a 3-thread `MultiThreadedExecutor` with three callback groups,
-and that is correctness, not performance: the default group keeps the timer,
-both subscriptions, the 1 s status timer and `save_maps` serialised as
-`rclcpp::spin()` did; a second group runs `start_mapping` and `reset_mapping`
-(MutuallyExclusive, so they serialise), which block on the `ResetLIO` future;
-a third owns that client, so the future's response can be delivered while the
-handler waits. Hence `m_pgo_mutex`, which guards `m_pgo` — a start, a reset
-and a save all *replace* it rather than mutating it, so every reader takes
-the lock:
+`src/main.cpp` runs a 3-thread `MultiThreadedExecutor`:
 
-| | holds `m_pgo_mutex` |
-|---|---|
-| `timerCB` | whole body |
-| `saveMapsCB` | whole body, including the save → IDLE transition at its end |
-| `beginRun` (start / reset) | phase 1 (a few lines) and phase 3 — never while waiting on the LIO future |
-| `publishStatus` / `statusTimerCB` | nothing: the phase and the two counters it reports are atomics |
+- the default group: the timer, both subscriptions, the status timer and `save_maps`, serialised;
+- a second group: `start_mapping` and `reset_mapping`, which block on the `ResetLIO` call;
+- a third group: the `ResetLIO` client, so its response arrives while the caller waits.
 
-The intake gate is atomics, not a lock, so `syncCB` never has to order two
-mutexes on its hot path; every *store* to the phase happens under
-`m_pgo_mutex`, which is what makes the service preconditions exact. The merge runs on a dedicated `std::thread` from a
-by-value snapshot of the keyframes, claimed by an atomic (`m_map_cloud_busy`)
-and joined only while that is false; every exception is caught inside the
-worker, because one escaping a `std::thread` is `std::terminate` — pgo gone,
-TF gone, mid-run. `main()` holds a *named* `shared_ptr` because
-`Executor::add_node` keeps a weak_ptr; a temporary would leave the executor
-spinning over nothing while looking alive in `ps`.
+`m_pgo_mutex` guards the pose graph; the timer and `save_maps` hold it for their whole body, start
+and reset only around the rebuild (never while waiting on pointlio). The run state and counters are
+atomics. The map merge runs on its own thread from a copy of the keyframes.
 
 ## Parameters
 
-`params/mapping_params.yaml`, keyed `/**/pgo_node:` so it applies at any
-namespace. Every key is a `declare_parameter` whose default repeats the struct
-default, so a missing key degrades to the code default instead of throwing —
-a change from the yaml-cpp loader, where most keys were required. Read once:
-the values are copied into the graph at construction and on every reset, so
-`ros2 param set` afterwards changes nothing. The inputs, the LIO reset service
-and the frames (`map`, `<robot_id>/pointlio_odom`) are not parameters; see
-Inputs.
+From `params/mapping_params.yaml` (keyed `/**/pgo_node:`). Read once at startup and on every
+reset; `ros2 param set` afterwards has no effect. A missing or misspelt key falls back to the
+default silently.
 
-| Parameter | Default (YAML) | Launch value | Notes |
-|---|---|---|---|
-| `map_cloud_dir` | `/dev/shm/syncai_pgo` | `<map_cloud_dir arg>/<robot_id>` | the launch's `map_cloud_dir:=` argument is the base |
-| `keyframe_delta_deg` / `keyframe_delta_m` | `10.0` / `0.5` | | keyframe every 10° or 0.5 m. **Write `10.0`**: a bare `10` is an int64 override and the node dies at startup with `InvalidParameterTypeException`. |
-| `loop_search_radius` | `1.0` | | m, over past keyframes |
-| `loop_time_tresh` | `60.0` | | s; candidates must be at least this old |
-| `loop_score_tresh` | `0.15` | | GICP fitness (mean squared point distance, m²) above this is rejected |
-| `loop_gicp_max_corr_dist` | `1.0` | | m, max GICP correspondence distance. The fork hard-coded 10. See "Loop verification" below |
-| `loop_gicp_num_threads` | `4` | | **int** |
-| `loop_gicp_num_neighbors` | `20` | | **int**, GICP covariance neighbours |
-| `loop_planar_correction` | `true` | | loop edge is a `PlanarLoopFactor` on the world-frame x / y / yaw only (`pgos/planar_loop_factor.h`); z / roll / pitch stay with the odometry. `false` = the fork's 6-DOF `BetweenFactor` |
-| `loop_noise_var_roll_pitch_z` | `0.01` | | only with `loop_planar_correction: false`: BetweenFactor variance on roll / pitch / z. x / y / yaw use the fitness score, as the fork did |
-| `loop_noise_yaw_sigma_deg` | `1.5` | | only with `loop_planar_correction: true`: the `PlanarLoopFactor`'s yaw sigma, **degrees**; its x / y keep variance = fitness. The fork's fitness-as-rad² yaw (an 18-22 deg sigma) was outvoted by ~1 deg of accumulated odometry, so a loop never corrected yaw (dp1f_1008_2's east corridor: 8 deg asked, none applied, passes left 1.1-1.6 m apart). `<= 0` restores that |
-| `loop_noise_xy_sigma_m` | `0.05` | | only with `loop_planar_correction: true`: the `PlanarLoopFactor`'s x / y sigma, **metres**. Fitness-as-m² (a 0.25-0.39 m sigma) left dp1f_1008_2's east corridor 0.4-0.5 m apart even with the yaw fixed; 0.1 m left 0.08-0.11 m, 0.05 m 0.01-0.04 m, and dp1f_1006 stays within 8 cm at either. `<= 0` = variance = fitness |
-| `keyframe_tilt_sigma_deg` | `0.5` | | **degrees**; a `GravityPriorFactor` (`pgos/gravity_prior_factor.h`) on every keyframe holding its roll / pitch w.r.t. gravity to Point-LIO's value. Needed by the yaw sigma above: without it a yaw correction is realised partly as pitch and the chain climbs or sinks (dp1f_1008_2: keyframe z moved 0.8 m median, 2.2 m worst). `<= 0` = off |
-| `loop_submap_half_range` | `5` | | keyframes each side of the candidate. **An int** — `5.0` is the mirror-image type error. |
-| `loop_submap_resolution` | `0.1` | | m, voxel leaf of the GICP submap |
-| `loop_search_period` | `5.0` | | s between loop searches |
-| `map_cloud_resolution` | `0.2` | | m, voxel leaf of the published merge |
-| `map_cloud_pub_period` | `3.0` | | s, floor between merges |
-| `start_on_launch` | `false` | `start_on_launch:=` argument | `true` comes up MAPPING instead of IDLE: the bag-replay knob, never the session's value |
-| `map_clean_enabled` | `true` | | spawn `clean_map` after a save with `save_patches`; `false` spawns nothing and writes no sidecar |
-| `map_clean_voxel_size` | `0.1` | | m, the voxel a point is judged in |
-| `map_clean_max_range` / `map_clean_min_range` | `20.0` / `0.5` | | m; rays truncated / returns off the robot's body ignored (and kept) |
-| `map_clean_lidar_height` | `0.481` | | m, lidar above the floor; keyframe z minus this is the floor |
-| `map_clean_floor_band` / `map_clean_dynamic_max_height` | `0.25` / `2.0` | | m; band around the floor where neither rule applies / top of the dynamic window |
-| `map_clean_floor_radius` | `10.0` | | m; keyframes within this give a cell its floor (per level) |
-| `map_clean_sparse_min_hits` | `2` | | **int**; fewer keyframes hitting a voxel → its points go. `<= 1` = off |
-| `map_clean_dynamic_miss_ratio` / `map_clean_dynamic_min_miss` | `2.0` / `3` | | the person rule; min_miss is an **int**, `<= 0` = off |
-| `map_clean_clip_below_floor` | `true` | | stop rays at keyframe floor − (`floor_band` − `voxel_size`) |
-| `map_clean_nice` | `10` | | **int**, the clean's nice value |
+| Parameter | Default | Notes |
+|---|---|---|
+| `map_cloud_dir` | `/dev/shm/syncai_pgo` | the launch appends `/<robot_id>` |
+| `start_on_launch` | `false` | start `MAPPING` without a `start_mapping` call (bag replay) |
+| `keyframe_delta_deg` / `keyframe_delta_m` | `10.0` / `0.5` | a new keyframe every 10° or 0.5 m |
+| `loop_search_radius` | `1.0` | m, radius for loop candidates |
+| `loop_time_tresh` | `60.0` | s, minimum age of a candidate |
+| `loop_score_tresh` | `0.15` | GICP fitness (m²) above this is rejected |
+| `loop_search_period` | `5.0` | s between loop searches |
+| `loop_submap_half_range` | `5` | **int**, keyframes on each side of the candidate |
+| `loop_submap_resolution` | `0.1` | m, voxel size of the GICP submap |
+| `loop_gicp_max_corr_dist` | `1.0` | m, max GICP correspondence distance |
+| `loop_gicp_num_threads` / `loop_gicp_num_neighbors` | `4` / `20` | **ints** |
+| `loop_planar_correction` | `true` | loop edge constrains only world x / y / yaw (`PlanarLoopFactor`); `false` = 6-DOF `BetweenFactor` |
+| `loop_noise_xy_sigma_m` / `loop_noise_yaw_sigma_deg` | `0.05` / `1.5` | planar loop sigmas; `<= 0` = use the fitness as variance |
+| `loop_noise_var_roll_pitch_z` | `0.01` | only with planar correction off |
+| `keyframe_tilt_sigma_deg` | `0.5` | holds each keyframe's roll / pitch to pointlio's; `<= 0` = off |
+| `map_cloud_resolution` | `0.2` | m, voxel size of the published map |
+| `map_cloud_pub_period` | `3.0` | s, minimum gap between map publishes |
+| `map_clean_enabled` | `true` | spawn `clean_map` after a save with patches |
+| `map_clean_voxel_size` | `0.1` | m |
+| `map_clean_max_range` / `map_clean_min_range` | `20.0` / `0.5` | m, ray length / robot-body cut-off |
+| `map_clean_lidar_height` | `0.481` | m, lidar above the floor |
+| `map_clean_floor_band` | `0.25` | m, band around the floor exempt from both rules |
+| `map_clean_floor_radius` | `10.0` | m, keyframes within this set a cell's floor |
+| `map_clean_dynamic_max_height` | `2.0` | m, top of the people window |
+| `map_clean_dynamic_miss_ratio` / `map_clean_dynamic_min_miss` | `2.0` / `3` | dynamic rule; `min_miss` is an **int**, `<= 0` = off |
+| `map_clean_sparse_min_hits` | `2` | **int**, sparse rule; `<= 1` = off |
+| `map_clean_clip_below_floor` | `true` | stop rays at the floor |
+| `map_clean_nice` | `10` | **int**, the clean's nice value |
+
+Every value is a double unless marked int. **Write doubles with a decimal point** (`10.0`): a bare
+`10` for a double, or `5.0` for an int, kills the node at startup.
 
 ### Loop verification
 
-A loop candidate (a past keyframe within `loop_search_radius`, at least
-`loop_time_tresh` old) is verified by registering the current keyframe's body
-cloud onto an 11-keyframe submap, both voxelised at `loop_submap_resolution`, and
-the result becomes the loop edge. Three things about that edge changed in
-2026-10, after an offline replay of `record/dp1f_1002` (a 645 s, 100 m
-corridor-and-hall run; the report and every number below are under
-`map/dp1f_bagrun/report/`):
+A candidate (a past keyframe within `loop_search_radius`, at least `loop_time_tresh` old) is
+verified by GICP-registering the current keyframe onto an 11-keyframe submap around it.
 
-- **Backend.** The fork's PCL point-to-point ICP with
-  `setMaxCorrespondenceDistance(10)` returned 1.5–3.7° of rotation and a z
-  component 2–7× too large for all seven corridor loops of that run, although
-  the raw Point-LIO poses of the two passes already agreed to 1–5 cm in z;
-  the two end-of-run loops it got right scored 0.006–0.013 against 0.06–0.13
-  for the bad ones, so `loop_score_tresh 0.15` rejected nothing (a corridor
-  scan with no ICP at all scores 0.09–0.19, because most of its far points
-  have no counterpart). Re-running those pairs offline, GICP / point-to-plane
-  with a 1 m correspondence distance returned the right amount. Hence GICP
-  (small_gicp's `RegistrationPCL`, the localizer's backend) with
-  `loop_gicp_max_corr_dist: 1.0`. The ICP backend stayed selectable for a while
-  and has since been removed; git history has it.
-- **Edge type.** The 6-DOF `BetweenFactor` let a slightly tilted loop bend the
-  whole chain: with per-edge rotation variance 1e-6 and 30–60 m of lever arm
-  the chain is softer in z than a loop factor whose six variances all equal
-  the fitness, so the map came out with a 15 cm double floor along the
-  corridor while every per-edge z constraint was honoured to 0.2 mm. Tight
-  roll / pitch / z variances on the BetweenFactor were tried first and still
-  leaked x into z (-2..-9 cm) because that factor's error is expressed in
-  the lidar body frame, which on this robot is pitched 15°.
-  `loop_planar_correction: true` therefore adds a `PlanarLoopFactor`
-  (`pgos/planar_loop_factor.h`): a 3-dim error on the WORLD-frame Δx, Δy,
-  Δyaw between the two keyframes, with the registration result projected to
-  x / y / yaw about the world z axis first. z / roll / pitch stay with the
-  odometry, which for a gravity-aligned LIO is the right owner. Rerun on the
-  same bag: revisit height error identical to the raw LIO (3.5 cm mean),
-  keyframe z within 2 cm of raw for 832 of 840 keyframes, single floor.
-- **Log.** Every accepted loop prints two `[PGONode][loop]` lines (below), so
-  the next bad closure can be read off the log instead of reconstructed from
-  rviz markers.
+- **GICP with a 1 m correspondence distance.** The original PCL ICP (10 m) returned degrees of
+  false rotation on corridor loops, and its fitness could not tell good loops from bad.
+- **Planar loop edge.** A 6-DOF loop edge bent the chain and produced a double floor; the
+  `PlanarLoopFactor` corrects only world x / y / yaw and leaves z / roll / pitch to the
+  gravity-aligned odometry.
+- **Logged.** Every accepted loop prints two `[PGONode][loop]` lines with the correction and the
+  keyframes' z before and after.
 
-Still open: the fitness gate counts all source points and so cannot tell a
-good corridor loop from a bad one (inlier RMSE + inlier ratio would), and the
-run above had little XY drift, so the x / y / yaw benefit of the loops is
-unmeasured — validate on a bag that drifts.
+Known gap: the fitness gate counts all source points, so it still cannot reliably reject a bad
+corridor loop.
 
 ## Running
 
 ```bash
-ros2 launch syncai_mapping mapping.launch.py                        # config/system.ini from ~/robot_ws
+ros2 launch syncai_mapping mapping.launch.py                                      # config/system.ini from ~/robot_ws
 ros2 launch syncai_mapping mapping.launch.py system_config:=/path/to/robot01.ini
-ros2 launch syncai_mapping mapping.launch.py map_cloud_dir:=/dev/shm/syncai_pgo   # the base; /<robot_id> is appended
-ros2 launch syncai_mapping mapping.launch.py start_on_launch:=true                # bag replay: no start_mapping needed
+ros2 launch syncai_mapping mapping.launch.py map_cloud_dir:=/dev/shm/syncai_pgo   # /<robot_id> is appended
+ros2 launch syncai_mapping mapping.launch.py start_on_launch:=true                # bag replay
 ```
 
-The mapping session runs it as the second pane of the `lio` window in
-`start_mapping.yaml`, right after `syncai_pointlio`; the log is
-`log/stack/<robot_id>/mapping/pgo/` (the directory keeps the node's name, not
-the package's). Launching this alone starts no LIO — run
-`syncai_pointlio` first.
+This starts no LIO: run `syncai_pointlio` first. In the mapping session it is the second pane of
+the `lio` window in `start_mapping.yaml`.
 
-The shell fallback for a run with no backend:
+Without a backend:
 
 ```bash
-ros2 service call /<robot_id>/pgo/start_mapping syncai_common/srv/StartMapping "{reset_lio: true}"   # robot still; drive once the live scan is back
+ros2 service call /<robot_id>/pgo/start_mapping syncai_common/srv/StartMapping "{reset_lio: true}"   # robot still
 ros2 service call /<robot_id>/pgo/save_maps syncai_common/srv/SaveMaps \
-  "{file_path: '/home/syncrobotic/robot_ws/map/<name>', save_patches: true}"   # directory must exist; ends the run
-ros2 service call /<robot_id>/pgo/reset_mapping syncai_common/srv/ResetMapping "{reset_lio: true}"   # mid-run only; robot still!
+  "{file_path: '/home/syncrobotic/robot_ws/map/<name>', save_patches: true}"   # directory must exist
+ros2 service call /<robot_id>/pgo/reset_mapping syncai_common/srv/ResetMapping "{reset_lio: true}"   # robot still
 ```
 
 Checking it:
 
 ```bash
-ros2 node info /<robot_id>/pgo/pgo_node                # subs /<id>/pointlio/{body_cloud,lio_odom}; srvs start_mapping save_maps reset_mapping
-ros2 param get /<robot_id>/pgo/pgo_node loop_score_tresh   # 0.15 → the params file was found
-ros2 service type /<robot_id>/pgo/save_maps            # syncai_common/srv/SaveMaps
-ros2 topic echo /<robot_id>/pgo/mapping_status --qos-durability transient_local --qos-reliability reliable   # state 0 = idle, 1 = mapping
-ros2 run tf2_ros tf2_echo map <robot_id>/pointlio_odom # identity while idle
+ros2 topic echo /<robot_id>/pgo/mapping_status --qos-durability transient_local --qos-reliability reliable
 ros2 topic echo /<robot_id>/pgo/map_cloud_file --qos-durability transient_local --qos-reliability reliable
-ls /dev/shm/syncai_pgo/<robot_id>                      # map_cloud_<seq>.pcd, newest two; empty while idle
+ros2 run tf2_ros tf2_echo map <robot_id>/pointlio_odom   # identity while idle
+ls /dev/shm/syncai_pgo/<robot_id>                        # newest two map_cloud_<seq>.pcd; empty while idle
 ```
 
 | Log line | Meaning |
 |---|---|
-| `[PGONode] inputs: /robot01/pointlio/body_cloud_dense + … \| TF map -> robot01/pointlio_odom \| …` | The names derived from the namespace. Unprefixed names mean a bare run outside `/<robot_id>/pgo`. |
-| `[PGONode] map_cloud merges are handed off as PCD files under …` | The hand-off directory is writable |
-| `[PGONode] loop verification: gicp, max corr dist 1.00 m, fitness gate 0.150, planar correction on, …` | The loop settings that are actually in force (see "Loop verification") |
-| `[PGONode][loop] target 44 -> source 252 \| fitness 0.0995 \| GICP moves source by (0.065, -0.024, 0.000) m, rot 0.21 deg \| z before: …` | A loop was accepted: what the registration asked for (world-frame displacement of the source keyframe and rotation) and both keyframes' z before the graph update. A z component that is not 0.000 with planar correction on, or a rotation of degrees rather than tenths, is the failure this line exists to catch |
-| `[PGONode][loop] target 44 -> source 252 \| z after: … (source-target -0.047, source moved -0.000)` | The same pair after the update. `source moved` is the z the optimiser actually applied |
-| `[PGONode] cannot create map_cloud_dir … the map_cloud_file hand-off is disabled for this run` | Not fatal; only the file output is off |
-| `Received out of order message` | A pair older than the last accepted one was dropped (bag loop, driver restart) |
-| `[PGONode] idle until start_mapping is called; …` | Normal at launch. A session that never calls Start maps nothing |
-| `[startMappingCB] Mapping started. …` | A run began; pointlio is re-initialising — the robot must be still |
-| `[resetMappingCB] Map discarded. … (dropped N key poses)` | A reset completed; N = 0 means the run had banked nothing |
-| `[saveMapsCB] Map saved (N keyframes). Mapping stopped … (<dir>/map.pcd)` | The run ended; `/dev/shm` is empty and the node is idle |
-| `LIO reset service … is not available` / `Timed out waiting for the LIO reset` | Start or reset refused (`nothing started` / `map kept`) — pointlio is down, or built against the old `interface` type |
+| `[PGONode] inputs: /robot01/pointlio/body_cloud_dense + …` | names derived from the namespace; no `/robot01` prefix means the node is not under `/<robot_id>/pgo` |
+| `[PGONode] idle until start_mapping is called; …` | normal at launch |
+| `[PGONode][loop] target 44 -> source 252 \| fitness … \| GICP moves source by …` | a loop was accepted |
+| `[saveMapsCB] Map saved (N keyframes). Mapping stopped …` | the run ended |
+| `LIO reset service … is not available` / `Timed out waiting for the LIO reset` | start or reset refused: pointlio is down |
+| `[PGONode] cannot create map_cloud_dir …` | the file hand-off is off for this run; the node keeps running |
 
 ## Gotchas
 
-- **Nothing here changes the ROS surface, and nothing should without a
-  cross-repo commit.** The backend calls `start_mapping` / `save_maps` /
-  `reset_mapping`, reads `mapping_status`, `map_cloud_file` and the PCDs
-  under `/dev/shm/syncai_pgo/<robot_id>`, and expects `map/<name>/`'s layout.
-  The five absolute names in
-  `mapping.launch.py` are the contract with
-  `syncai_pointlio/launch/pointlio.launch.py`.
-- **pgo comes up idle.** A mapping session with no `start_mapping` call maps
-  nothing, silently (the launch log says so once). A backend older than the
-  Start control therefore cannot map against this node — ship the two
-  together, or run with `start_on_launch:=true` meanwhile. The shell fallback
-  is the service call under "Running".
-- **The service types are `syncai_common`'s, not `interface`'s.** They moved
-  with the port. A backend still importing `interface.srv.SaveMaps` /
-  `ResetMapping` finds no server: save-map and "New map" fail with a type
-  mismatch, cleanly, until it switches to `syncai_common.srv`. Rebuild
-  `syncai_common syncai_pointlio syncai_mapping` together, and clear the stale
-  `install/pgo` / `install/interface` from before the port so the old headers
-  and `pgo_launch.py` cannot be found by mistake.
-- **`local_frame` must equal pointlio's `world_frame`.** pgo derives it as
-  `<robot_id>/pointlio_odom` from its namespace, and pointlio.launch.py sets
-  `world_frame` to the same; if pointlio's ever changes, update the
-  derivation in `PGONode::loadParameters()`, or `map → local_frame` is
-  broadcast onto a frame nobody looks up and the console's map view floats.
-- **Types in the params file.** Every tuning value is a double except
-  `loop_submap_half_range`; a bare integer for a double key, or a float for
-  the int key, kills the node at startup. A misspelt key no longer throws —
-  it silently uses the default — so read the startup log.
-- **GTSAM is a manual dependency.** 4.2.0, source-built into `/usr/local` by
-  the `Dockerfile`'s `deps-builder` stage (system Eigen, TBB on). There is no
-  rosdep key for that build, so `package.xml` does not list it — the same
-  treatment `syncai_pointlio` gives Sophus. Recreating the container from the
-  image keeps it; a hand-built one loses it.
-- **An unoptimised build cannot keep up.** CMake defaults `CMAKE_BUILD_TYPE`
-  to Release (upstream forced it); iSAM2 plus a GICP verification per keyframe
-  and a full-map merge on the worker are not `-O0` workloads on the Jetson.
-- **Lint is partly off.** `ament_cmake_copyright` and `cpplint` are disabled
-  as they were upstream: `pgos/` has no per-file licence headers (the package
-  `LICENSE` covers it). All four `pgos/` files and the node shell follow the
-  workspace `.clang-format`.
-- `rviz/pgo.rviz` and `rviz/hba.rviz` from the fork were not carried over
-  (the former's fixed frame was the upstream `lidar`); rviz configs live in
-  `config/rviz2/`.
+- **The ROS interface is a cross-repo contract.** The backend calls the three services, reads
+  `mapping_status`, `map_cloud_file` and `/dev/shm/syncai_pgo/<robot_id>`, and expects the
+  `map/<name>/` layout. Change none of it without updating the other side.
+- **The node comes up idle.** A session that never calls `start_mapping` maps nothing.
+- **`<robot_id>/pointlio_odom` must match pointlio's `world_frame`.** If pointlio's ever changes,
+  update `PGONode::loadParameters()`, or the correction lands on a frame nobody uses.
+- **GTSAM 4.2.0 is not in `package.xml`.** It is source-built into `/usr/local` by the Dockerfile
+  (system Eigen, no `-march=native`); a GTSAM with bundled Eigen crashes alongside PCL.
+- **Build in Release.** The CMake default; a debug build cannot keep up on the Jetson.
+- **`cpplint` and `ament_cmake_copyright` are off**, because `pgos/` has no per-file licence
+  headers (the package `LICENSE` covers it).
