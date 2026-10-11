@@ -11,7 +11,7 @@ and PCL are far more mature there. Two executables:
   TF, and the `start_mapping` / `save_maps` / `reset_mapping` services plus `mapping_status`.
 - `clean_map` (`dynamic_removal/`): the detached post-save job `pgo_node` spawns; it ray-casts
   the saved patches and rewrites `map.pcd` without people and one-off returns. With
-  `map_clean_octomap` (default on) it also writes `octomap.bt` (free + occupied, built in the
+  `map_clean_octomap` (default off) it also writes `octomap.bt` (free + occupied, built in the
   same misses pass; never-seen space is unknown, removed voxels are free only if a ray passed
   through them, hit floor-band voxels stay occupied against grazing rays) for `octomap_planner`'s 3D global paths. Its outputs
   are `map.pcd`, `octomap.bt` and `map_clean.recipe.json`; the 2D map is made from `map.pcd`

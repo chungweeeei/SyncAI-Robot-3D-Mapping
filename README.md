@@ -11,8 +11,8 @@ It has two executables:
   and serves `start_mapping`, `save_maps` and `reset_mapping`. It runs only in the mapping
   session; in navigation `syncai_localizer` owns the same TF.
 - **`clean_map`**: a detached job `pgo_node` starts after each save. It rewrites the saved
-  `map.pcd` without people and one-off returns, and writes `octomap.bt`, the occupancy tree
-  `octomap_planner` plans 3D global paths on.
+  `map.pcd` without people and one-off returns, and with `map_clean_octomap` (off by default)
+  writes `octomap.bt`, the occupancy tree `octomap_planner` plans 3D global paths on.
 
 ```
    syncai_pointlio            /<id>/pointlio/{body_cloud_dense, lio_odom}
@@ -29,7 +29,7 @@ It has two executables:
         │                      /dev/shm/…      (ends the run)                 RESETTING
         │                      (backend preview)    │
         │                                           ▼
-        │                                       clean_map ──► map.pcd (cleaned), octomap.bt
+        │                                       clean_map ──► map.pcd (cleaned), [octomap.bt]
 ```
 
 Source layout: `src/pgos/` is the pose graph (upstream-derived, MIT), `src/pgo_node.cpp` is the
@@ -150,17 +150,18 @@ many **passed through** it (M), and rewrites `map.pcd` without two classes of po
 `converting` with the raw map. **A 2D map made while it says `converting` came from the raw map**;
 redo it once it reads `ok`.
 
-Run by hand to re-clean any save with `patches/` + `poses.txt`, which is also how to convert one to
-`octomap.bt` offline. It rewrites `map.pcd` too, identically for the same params (it re-cleans from
-the raw patches). A bare `map.pcd` cannot be converted: without scan origins there is no free
-space.
+Run by hand to re-clean any save with `patches/` + `poses.txt`; with `--octomap 1` this is also
+how to convert one to `octomap.bt` offline. It rewrites `map.pcd` too, identically for the same
+params (it re-cleans from the raw patches). A bare `map.pcd` cannot be converted: without scan
+origins there is no free space.
 
 ```bash
 ros2 run syncai_mapping clean_map map/<name>
 ros2 run syncai_mapping clean_map map/<name> --lock none --dynamic-min-miss 0   # sparse rule only
+ros2 run syncai_mapping clean_map map/<name> --octomap 1                        # also octomap.bt
 #   --voxel-size 0.1 --max-range 20 --min-range 0.5 --lidar-height 0.481 --floor-band 0.25
 #   --dynamic-max-height 2.0 --floor-radius 10 --sparse-min-hits 2 --dynamic-miss-ratio 2.0
-#   --dynamic-min-miss 3 --clip-below-floor 1 --octomap 1 --nice 0 --started-at <ISO-8601>
+#   --dynamic-min-miss 3 --clip-below-floor 1 --octomap 0 --nice 0 --started-at <ISO-8601>
 # exit 0 ok · 1 usage · 2 no poses.txt / readable patch · 3 failed · 4 interrupted
 cat map/<name>/map_clean.recipe.json
 ```
@@ -248,7 +249,7 @@ default silently.
 | `map_clean_dynamic_miss_ratio` / `map_clean_dynamic_min_miss` | `2.0` / `3` | dynamic rule; `min_miss` is an **int**, `<= 0` = off |
 | `map_clean_sparse_min_hits` | `2` | **int**, sparse rule; `<= 1` = off |
 | `map_clean_clip_below_floor` | `true` | stop rays at the floor |
-| `map_clean_octomap` | `true` | also write `octomap.bt` |
+| `map_clean_octomap` | `false` | also write `octomap.bt` |
 | `map_clean_nice` | `10` | **int**, the clean's nice value |
 
 Every value is a double unless marked int or string (the `true` / `false` switches are bools). **Write doubles with a decimal point** (`10.0`): a bare

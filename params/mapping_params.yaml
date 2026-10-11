@@ -162,5 +162,5 @@
     map_clean_clip_below_floor: true
     # Also write octomap.bt (free + occupied, at map_clean_voxel_size) for
     # octomap_planner's 3D global paths. Most of the clean's memory when on.
-    map_clean_octomap: true
+    map_clean_octomap: false
     map_clean_nice: 10               # int, not 10.0

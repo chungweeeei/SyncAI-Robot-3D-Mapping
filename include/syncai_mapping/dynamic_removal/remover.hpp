@@ -115,7 +115,7 @@ struct Params
   // tree is what the clean's memory is then mostly made of: every voxel a ray
   // crossed. A tree that runs out of memory is dropped and map.pcd is still
   // cleaned; the sidecar's octomap_error says so.
-  bool octomap = true;
+  bool octomap = false;
 };
 
 struct Measurements
