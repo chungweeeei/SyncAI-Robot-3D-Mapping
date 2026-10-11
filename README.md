@@ -140,6 +140,16 @@ many **passed through** it (M), and rewrites `map.pcd` without two classes of po
   columns were occupied on dp1f_1008_2_v2; 96 % with this). On dp1f_1008_2_v2 (2004 keyframes) it took the clean from
   142 s to 208 s and its peak memory from 1.0 to 2.0 GB, for a 2.8 MB file. A tree that runs out of
   memory is dropped and `map.pcd` is still cleaned.
+- **Floor fill** (`floor_fill_radius`, 3 m): even so, the floor 1-3 m from the path has gaps
+  (the shadows of shelves and walls, sampled too thinly), and a legged robot's planner needs ground
+  under every step. The tree (not `map.pcd`) gets those gaps closed at the height of the floor next
+  to them: a column within that radius of a keyframe on the same level, **enclosed** (hit floor or
+  an obstacle within 1.5 m on both sides along some line), with space up to 0.5 m above seen free
+  and empty and nothing hit up to 1 m below (a stair down, a drop). Enclosed, not grown outward:
+  grown outward it ran through doors, windows and glass fronts into fans of floor outside the
+  building. On dp1f_1008_2_v2 it adds 43 k voxels; of the columns with open space above, 89 % (1-2
+  m from the path) and 71 % (2-3 m) then have floor, from 72 % and 40 %. A hole no ray looked into
+  is not caught; hence the radius.
 - **Process model.** A detached child process (`posix_spawn`, own session, `nice`), so it survives
   a mode switch and the OOM killer picks it before `pgo_node`. One clean runs per host (a `flock` on
   `/dev/shm/syncai_pgo/clean_map.lock`). A new save into the same directory stops the old clean.
@@ -160,7 +170,8 @@ ros2 run syncai_mapping clean_map map/<name>
 ros2 run syncai_mapping clean_map map/<name> --lock none --dynamic-min-miss 0   # sparse rule only
 #   --voxel-size 0.1 --max-range 20 --min-range 0.5 --lidar-height 0.481 --floor-band 0.25
 #   --dynamic-max-height 2.0 --floor-radius 10 --sparse-min-hits 2 --dynamic-miss-ratio 2.0
-#   --dynamic-min-miss 3 --clip-below-floor 1 --octomap 1 --nice 0 --started-at <ISO-8601>
+#   --dynamic-min-miss 3 --clip-below-floor 1 --octomap 1 --floor-fill-radius 3 --nice 0
+#   --started-at <ISO-8601>
 # exit 0 ok · 1 usage · 2 no poses.txt / readable patch · 3 failed · 4 interrupted
 cat map/<name>/map_clean.recipe.json
 ```
@@ -249,6 +260,7 @@ default silently.
 | `map_clean_sparse_min_hits` | `2` | **int**, sparse rule; `<= 1` = off |
 | `map_clean_clip_below_floor` | `true` | stop rays at the floor |
 | `map_clean_octomap` | `true` | also write `octomap.bt` |
+| `map_clean_floor_fill_radius` | `3.0` | m, infer floor in `octomap.bt` this far from the path; `<= 0` = off |
 | `map_clean_nice` | `10` | **int**, the clean's nice value |
 
 Every value is a double unless marked int or string (the `true` / `false` switches are bools). **Write doubles with a decimal point** (`10.0`): a bare

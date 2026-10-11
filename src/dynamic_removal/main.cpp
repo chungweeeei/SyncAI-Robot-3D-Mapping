@@ -3,7 +3,8 @@
 //   clean_map <map_dir> [--voxel-size 0.1] [--max-range 20] [--min-range 0.5]
 //       [--lidar-height 0.481] [--floor-band 0.25] [--dynamic-max-height 2.0]
 //       [--floor-radius 10] [--sparse-min-hits 2] [--dynamic-miss-ratio 2.0]
-//       [--dynamic-min-miss 3] [--clip-below-floor 1] [--octomap 1] [--nice 0]
+//       [--dynamic-min-miss 3] [--clip-below-floor 1] [--octomap 1] [--floor-fill-radius 3]
+//       [--nice 0]
 //       [--lock <path>|none] [--started-at <ISO-8601>]
 //
 // pgo_node spawns it after a successful save_maps with save_patches
@@ -58,7 +59,7 @@ void usage()
                "         [--lidar-height 0.481] [--floor-band 0.25] [--dynamic-max-height 2.0] "
                "[--floor-radius 10]\n"
                "         [--sparse-min-hits 2] [--dynamic-miss-ratio 2.0] [--dynamic-min-miss 3]\n"
-               "         [--clip-below-floor 1] [--octomap 1]\n"
+               "         [--clip-below-floor 1] [--octomap 1] [--floor-fill-radius 3]\n"
                "         [--nice 0] [--lock /dev/shm/syncai_pgo/clean_map.lock|none] "
                "[--started-at <ISO-8601 UTC>]\n";
 }
@@ -172,6 +173,8 @@ int main(int argc, char ** argv)
     } else if (a == "--octomap") {
       good = (v == "0" || v == "1");
       params.octomap = (v == "1");
+    } else if (a == "--floor-fill-radius") {
+      good = parseDouble(v, params.floor_fill_radius);
     } else if (a == "--nice") {
       good = parseDouble(v, d) && d == static_cast<int>(d);
       nice_value = static_cast<int>(d);
@@ -276,7 +279,8 @@ int main(int argc, char ** argv)
                 << " octomap_leaves=" << m.octomap_leaves
                 << " (occupied=" << m.octomap_occupied_leaves << " free=" << m.octomap_free_leaves
                 << ") octomap_unknown_voxels=" << m.octomap_unknown_voxels
-                << " octomap_floor_restored=" << m.octomap_floor_restored << " in " << m.elapsed_s
+                << " octomap_floor_restored=" << m.octomap_floor_restored
+                << " octomap_floor_filled=" << m.octomap_floor_filled << " in " << m.elapsed_s
                 << " s" << std::endl;
       if (params.octomap && !m.octomap_written) {
         std::cerr << "[clean_map] map.pcd cleaned but no " << dr::kOctomapFile << ": "

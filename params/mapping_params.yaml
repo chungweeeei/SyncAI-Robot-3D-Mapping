@@ -163,4 +163,8 @@
     # Also write octomap.bt (free + occupied, at map_clean_voxel_size) for
     # octomap_planner's 3D global paths. Most of the clean's memory when on.
     map_clean_octomap: true
+    # Close enclosed gaps in the floor of octomap.bt (only) up to this far from
+    # the path on the same level, where the lidar sampled it too thinly (shelf
+    # and wall shadows); <= 0 turns it off, m.
+    map_clean_floor_fill_radius: 3.0
     map_clean_nice: 10               # int, not 10.0

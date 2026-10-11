@@ -116,6 +116,14 @@ struct Params
   // crossed. A tree that runs out of memory is dropped and map.pcd is still
   // cleaned; the sidecar's octomap_error says so.
   bool octomap = true;
+  // Floor inferred in the tree (not in map.pcd) up to this far (m) from a
+  // keyframe on the same level; <= 0 turns it off. The lidar samples the
+  // floor too thinly in the shadows of shelves and walls a few metres out,
+  // and a legged robot's planner needs ground under every step. Gaps in the
+  // hit floor are closed where they are enclosed (hit floor or an obstacle
+  // on both sides), the space above was observed free and nothing was seen
+  // below (a stair down, a drop); remover.cpp's fillFloor has the rules.
+  double floor_fill_radius = 3.0;
 };
 
 struct Measurements
@@ -135,6 +143,7 @@ struct Measurements
   size_t octomap_free_leaves = 0;
   size_t octomap_unknown_voxels = 0;  // removed voxels no ray passed through: deleted
   size_t octomap_floor_restored = 0;  // hit floor voxels the misses had made free
+  size_t octomap_floor_filled = 0;    // floor voxels inferred (floor_fill_radius)
   std::string octomap_error;          // why a requested tree was not written; "" otherwise
   double elapsed_s = 0.0;
 };

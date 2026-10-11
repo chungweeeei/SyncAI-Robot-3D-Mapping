@@ -197,6 +197,167 @@ void savePcd(const fs::path & tmp, const pcl::PointCloud<pcl::PointXYZI> & cloud
   }
 }
 
+// Floor inferred where the lidar sampled it too thinly (Params::floor_fill_radius):
+// the gaps in the hit floor closed, over 0.1 m columns, at the height of the
+// floor next to them. A column takes a floor voxel only if
+//  - it has none within a level of that height already,
+//  - that height is within floor_band of its local floor, and a keyframe on
+//    the same level is within floor_fill_radius,
+//  - it is enclosed: along some line through it (x, y or a diagonal), hit
+//    floor or an obstacle lies within kFillGap on BOTH sides. That is the
+//    shadow behind a shelf or along a wall, not open space on one side of
+//    the floor: grown outward instead, the fill ran through every door,
+//    window and glass front into fans of "floor" outside the building,
+//  - some voxel up to kFillClearance above it is observed free (a ray went
+//    over it: open floor in view, not behind a wall or under a shelf no ray
+//    reached) and none from two voxels up is occupied (a floor surface often
+//    spans two voxels); the column it grows from must be open the same way,
+//    so it never grows from a wall's foot, which is floor band too,
+//  - nothing kept was hit between floor_band and kFillDropDepth below it: a
+//    stair going down, a loading-dock edge, the lower level seen through a
+//    gap. A hole no ray looked into is not caught -- hence the radius.
+// It grows from hit floor only, so it never makes an island.
+constexpr double kFillClearance = 0.5;  // m
+constexpr double kFillDropDepth = 1.0;  // m
+constexpr double kFillGap = 1.5;        // m
+
+size_t fillFloor(
+  octomap::OcTree & tree, const CountMap & counts, const std::vector<FloorRef> & floors,
+  const Params & params, const std::function<double(double, double, double)> & localFloor)
+{
+  const double res = params.voxel_size, band = params.floor_band, r = params.floor_fill_radius;
+  const int level = static_cast<int>(std::ceil(2.0 * band / res));
+  const int clearance = static_cast<int>(std::ceil(kFillClearance / res));
+  const int drop_top = static_cast<int>(std::ceil(band / res)) + 1;
+  const int drop_bottom = static_cast<int>(std::ceil(kFillDropDepth / res));
+  const float occupied_log = tree.getClampingThresMaxLog();
+  auto shifted = [](const octomap::OcTreeKey & k, int dx, int dy, int dz) {
+    return octomap::OcTreeKey(k[0] + dx, k[1] + dy, k[2] + dz);
+  };
+
+  // Every floor voxel kept, and per column and level the one nearest the
+  // local floor as the seed: a wall's foot is in the floor band too, and
+  // growing from it would raise the floor by up to floor_band.
+  octomap::KeySet ground, filled_keys, tried;
+  std::unordered_map<uint64_t, std::pair<octomap::OcTreeKey, double>> seeds;
+  for (const auto & [key, c] : counts) {
+    if (c.removed || !c.on_floor || c.hits == 0) continue;
+    ground.insert(key);
+    const octomap::point3d v = tree.keyToCoord(key);
+    const double fz = localFloor(v.x(), v.y(), v.z());
+    const uint64_t id =
+      (uint64_t(key[0]) << 32) | (uint64_t(key[1]) << 16) | uint64_t(uint16_t(std::lround(fz)));
+    const double off = std::fabs(v.z() - fz);
+    auto [it, fresh] = seeds.emplace(id, std::make_pair(key, off));
+    if (!fresh && off < it->second.second) it->second = {key, off};
+  }
+  std::vector<octomap::OcTreeKey> queue;
+  queue.reserve(seeds.size());
+
+  // Keyframes within r of a 1 m cell, cached per cell.
+  std::unordered_map<long long, std::vector<FloorRef>> near;
+  auto nearPath = [&](double x, double y, double fz) {
+    const long long k = ((long long)std::floor(x) << 32) ^ (long long)(std::floor(y) + 1e6);
+    auto it = near.find(k);
+    if (it == near.end()) {
+      const double cx = std::floor(x) + .5, cy = std::floor(y) + .5, reach = r + 0.75;
+      std::vector<FloorRef> v;
+      for (const auto & p : floors) {
+        if ((p.x - cx) * (p.x - cx) + (p.y - cy) * (p.y - cy) < reach * reach) v.push_back(p);
+      }
+      it = near.emplace(k, std::move(v)).first;
+    }
+    for (const auto & p : it->second) {
+      if (std::fabs(p.f - fz) <= band && (p.x - x) * (p.x - x) + (p.y - y) * (p.y - y) <= r * r) {
+        return true;
+      }
+    }
+    return false;
+  };
+  auto inBand = [&](const octomap::KeySet & set, const octomap::OcTreeKey & k) {
+    for (int dz = -level; dz <= level; ++dz) {
+      if (set.count(shifted(k, 0, 0, dz))) return true;
+    }
+    return false;
+  };
+  // Something kept was hit from two voxels to kFillClearance above.
+  auto obstacle = [&](const octomap::OcTreeKey & k) {
+    for (int dz = 2; dz <= clearance; ++dz) {
+      const auto it = counts.find(shifted(k, 0, 0, dz));
+      if (it != counts.end() && !it->second.removed && it->second.hits > 0) return true;
+    }
+    return false;
+  };
+  auto solid = [&](const octomap::OcTreeKey & k) { return inBand(ground, k) || obstacle(k); };
+  auto enclosed = [&](const octomap::OcTreeKey & k) {
+    constexpr int kAxis[4][2] = {{1, 0}, {0, 1}, {1, 1}, {1, -1}};
+    for (const auto & a : kAxis) {
+      const int steps =
+        static_cast<int>(kFillGap / (res * std::sqrt(double(a[0] * a[0] + a[1] * a[1]))));
+      bool both = true;
+      for (int side : {1, -1}) {
+        bool found = false;
+        for (int i = 1; i <= steps && !found; ++i) {
+          found = solid(shifted(k, side * i * a[0], side * i * a[1], 0));
+        }
+        both = both && found;
+      }
+      if (both) return true;
+    }
+    return false;
+  };
+  // Some voxel above observed free, and none occupied but the one right
+  // above: a floor surface often spans two voxels.
+  auto openAbove = [&](const octomap::OcTreeKey & k) {
+    bool seen_free = false;
+    for (int dz = 1; dz <= clearance; ++dz) {
+      const auto * node = tree.search(shifted(k, 0, 0, dz));
+      if (!node) continue;
+      if (!tree.isNodeOccupied(node)) {
+        seen_free = true;
+      } else if (dz > 1) {
+        return false;
+      }
+    }
+    return seen_free;
+  };
+  auto dropBelow = [&](const octomap::OcTreeKey & k) {
+    for (int dz = drop_top; dz <= drop_bottom; ++dz) {
+      const auto it = counts.find(shifted(k, 0, 0, -dz));
+      if (it != counts.end() && !it->second.removed && it->second.hits + it->second.clipped > 0) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  for (const auto & [id, s] : seeds) {
+    if (openAbove(s.first)) queue.push_back(s.first);
+  }
+  seeds.clear();
+
+  size_t filled = 0;
+  constexpr int kStep[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+  for (size_t head = 0; head < queue.size(); ++head) {
+    const octomap::OcTreeKey from = queue[head];
+    for (const auto & s : kStep) {
+      const octomap::OcTreeKey k = shifted(from, s[0], s[1], 0);
+      // Every test below depends on the scans alone, not on the fill so far:
+      // a column is judged once.
+      if (!tried.insert(k).second || inBand(ground, k) || inBand(filled_keys, k)) continue;
+      const octomap::point3d v = tree.keyToCoord(k);
+      const double fz = localFloor(v.x(), v.y(), v.z());
+      if (std::isnan(fz) || std::fabs(v.z() - fz) > band || !nearPath(v.x(), v.y(), fz)) continue;
+      if (!openAbove(k) || dropBelow(k) || !enclosed(k)) continue;
+      tree.setNodeValue(k, occupied_log, true);
+      filled_keys.insert(k);
+      queue.push_back(k);
+      ++filled;
+    }
+  }
+  return filled;
+}
+
 bool cleanImpl(
   const fs::path & dir, const Params & params, Measurements & out, const Progress & progress)
 {
@@ -408,6 +569,9 @@ bool cleanImpl(
           tree.deleteNode(key);
           ++out.octomap_unknown_voxels;
         }
+      }
+      if (params.floor_fill_radius > 0.0) {
+        out.octomap_floor_filled = fillFloor(tree, counts, floors, params, localFloor);
       }
       tree.updateInnerOccupancy();
       // The non-const writeBinary converts the tree to max-likelihood and

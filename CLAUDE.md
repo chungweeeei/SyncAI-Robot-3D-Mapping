@@ -13,7 +13,8 @@ and PCL are far more mature there. Two executables:
   the saved patches and rewrites `map.pcd` without people and one-off returns. With
   `map_clean_octomap` (default on) it also writes `octomap.bt` (free + occupied, built in the
   same misses pass; never-seen space is unknown, removed voxels are free only if a ray passed
-  through them, hit floor-band voxels stay occupied against grazing rays) for `octomap_planner`'s 3D global paths. Its outputs
+  through them, hit floor-band voxels stay occupied against grazing rays, and enclosed gaps in the floor within
+  `map_clean_floor_fill_radius` of the path are closed) for `octomap_planner`'s 3D global paths. Its outputs
   are `map.pcd`, `octomap.bt` and `map_clean.recipe.json`; the 2D map is made from `map.pcd`
   downstream, so the tree must never fail the clean (out of memory drops it, `map.pcd` still
   goes).

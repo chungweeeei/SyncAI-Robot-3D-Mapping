@@ -522,15 +522,18 @@ void PGONode::loadParameters()
   mc.dynamic_min_miss = this->declare_parameter("map_clean_dynamic_min_miss", mc.dynamic_min_miss);
   mc.clip_below_floor = this->declare_parameter("map_clean_clip_below_floor", mc.clip_below_floor);
   mc.octomap = this->declare_parameter("map_clean_octomap", mc.octomap);
+  mc.floor_fill_radius =
+    this->declare_parameter("map_clean_floor_fill_radius", mc.floor_fill_radius);
   RCLCPP_INFO(
     this->get_logger(),
     "[PGONode] map cleaning after save: %s | voxel %.3f m, range %.1f-%.1f m, lidar height "
     "%.3f m, floor band %.2f m, dynamic max height %.1f m, floor radius %.1f m, sparse min hits "
-    "%d, dynamic miss ratio %.2f, dynamic min miss %d, clip below floor %s, octomap %s, nice %d",
+    "%d, dynamic miss ratio %.2f, dynamic min miss %d, clip below floor %s, octomap %s, floor "
+    "fill radius %.1f m, nice %d",
     m_node_config.map_clean_enabled ? "on" : "off", mc.voxel_size, mc.min_range, mc.max_range,
     mc.lidar_height, mc.floor_band, mc.dynamic_max_height, mc.floor_radius, mc.sparse_min_hits,
     mc.dynamic_miss_ratio, mc.dynamic_min_miss, mc.clip_below_floor ? "on" : "off",
-    mc.octomap ? "on" : "off", m_node_config.map_clean_nice);
+    mc.octomap ? "on" : "off", mc.floor_fill_radius, m_node_config.map_clean_nice);
 
   // The names derived from the namespace, and the launch's overrides. A value
   // here without a robot_id prefix means the node was started bare (outside
@@ -1388,6 +1391,8 @@ std::string PGONode::startMapClean(const std::filesystem::path & map_dir, bool h
     oc.clip_below_floor ? "1" : "0",
     "--octomap",
     oc.octomap ? "1" : "0",
+    "--floor-fill-radius",
+    num(oc.floor_fill_radius),
     "--nice",
     std::to_string(m_node_config.map_clean_nice),
     "--started-at",
