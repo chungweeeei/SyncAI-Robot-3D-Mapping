@@ -3,14 +3,15 @@
 //   clean_map <map_dir> [--voxel-size 0.1] [--max-range 20] [--min-range 0.5]
 //       [--lidar-height 0.481] [--floor-band 0.25] [--dynamic-max-height 2.0]
 //       [--floor-radius 10] [--sparse-min-hits 2] [--dynamic-miss-ratio 2.0]
-//       [--dynamic-min-miss 3] [--clip-below-floor 1] [--nice 0]
+//       [--dynamic-min-miss 3] [--clip-below-floor 1] [--octomap 1] [--nice 0]
 //       [--lock <path>|none] [--started-at <ISO-8601>]
 //
 // pgo_node spawns it after a successful save_maps with save_patches
 // (detached, nice 10); run by hand it re-cleans any saved map from its
 // patches: `ros2 run syncai_mapping clean_map map/<name>`. It REPLACES
-// map.pcd and writes map_clean.recipe.json itself, from "converting" to "ok" /
-// "failed", so its outcome survives the node that started it.
+// map.pcd, writes octomap.bt beside it (unless --octomap 0) and writes
+// map_clean.recipe.json itself, from "converting" to "ok" / "failed", so its
+// outcome survives the node that started it.
 //
 // Exit codes: 0 ok, 1 usage, 2 no usable input (poses.txt / patches/),
 // 3 clean or write failed, 4 interrupted (SIGTERM / SIGINT).
@@ -57,7 +58,7 @@ void usage()
                "         [--lidar-height 0.481] [--floor-band 0.25] [--dynamic-max-height 2.0] "
                "[--floor-radius 10]\n"
                "         [--sparse-min-hits 2] [--dynamic-miss-ratio 2.0] [--dynamic-min-miss 3]\n"
-               "         [--clip-below-floor 1]\n"
+               "         [--clip-below-floor 1] [--octomap 1]\n"
                "         [--nice 0] [--lock /dev/shm/syncai_pgo/clean_map.lock|none] "
                "[--started-at <ISO-8601 UTC>]\n";
 }
@@ -80,7 +81,7 @@ void lowerPriority(int nice_value)
     std::cerr << "[clean_map] setpriority(" << nice_value << "): " << std::strerror(errno) << "\n";
   }
   // Make this process the OOM killer's first choice. The hit-voxel map of a
-  // large site is hundreds of MB, and without this the kernel picks the
+  // large site is hundreds of MB, the octree GBs, and without this the kernel picks the
   // largest RSS -- which, mid-run, can be pgo_node holding an unsaved map.
   // Raising one's own score needs no privilege.
   std::ofstream("/proc/self/oom_score_adj") << 500;
@@ -168,6 +169,9 @@ int main(int argc, char ** argv)
     } else if (a == "--clip-below-floor") {
       good = (v == "0" || v == "1");
       params.clip_below_floor = (v == "1");
+    } else if (a == "--octomap") {
+      good = (v == "0" || v == "1");
+      params.octomap = (v == "1");
     } else if (a == "--nice") {
       good = parseDouble(v, d) && d == static_cast<int>(d);
       nice_value = static_cast<int>(d);
@@ -269,7 +273,15 @@ int main(int argc, char ** argv)
                 << " sparse_voxels=" << m.sparse_voxels
                 << " map_points_removed=" << m.map_points_removed
                 << " map_points_kept=" << m.map_points_kept << " clipped_rays=" << m.clipped_rays
-                << " in " << m.elapsed_s << " s" << std::endl;
+                << " octomap_leaves=" << m.octomap_leaves
+                << " (occupied=" << m.octomap_occupied_leaves << " free=" << m.octomap_free_leaves
+                << ") octomap_unknown_voxels=" << m.octomap_unknown_voxels
+                << " octomap_floor_restored=" << m.octomap_floor_restored << " in " << m.elapsed_s
+                << " s" << std::endl;
+      if (params.octomap && !m.octomap_written) {
+        std::cerr << "[clean_map] map.pcd cleaned but no " << dr::kOctomapFile << ": "
+                  << m.octomap_error << std::endl;
+      }
     }
   } catch (const dr::InputError & e) {
     writeFailed(e.what());

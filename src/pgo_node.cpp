@@ -501,7 +501,8 @@ void PGONode::loadParameters()
   // The post-save map cleaning. Handed to clean_map on its command line and
   // recorded in the sidecar, so what a map was cleaned with is on disk beside
   // it. All doubles except map_clean_nice, map_clean_sparse_min_hits and
-  // map_clean_dynamic_min_miss (ints) and map_clean_clip_below_floor (bool).
+  // map_clean_dynamic_min_miss (ints) and map_clean_clip_below_floor /
+  // map_clean_octomap (bools).
   m_node_config.map_clean_enabled =
     this->declare_parameter("map_clean_enabled", m_node_config.map_clean_enabled);
   m_node_config.map_clean_nice =
@@ -520,15 +521,16 @@ void PGONode::loadParameters()
     this->declare_parameter("map_clean_dynamic_miss_ratio", mc.dynamic_miss_ratio);
   mc.dynamic_min_miss = this->declare_parameter("map_clean_dynamic_min_miss", mc.dynamic_min_miss);
   mc.clip_below_floor = this->declare_parameter("map_clean_clip_below_floor", mc.clip_below_floor);
+  mc.octomap = this->declare_parameter("map_clean_octomap", mc.octomap);
   RCLCPP_INFO(
     this->get_logger(),
     "[PGONode] map cleaning after save: %s | voxel %.3f m, range %.1f-%.1f m, lidar height "
     "%.3f m, floor band %.2f m, dynamic max height %.1f m, floor radius %.1f m, sparse min hits "
-    "%d, dynamic miss ratio %.2f, dynamic min miss %d, clip below floor %s, nice %d",
+    "%d, dynamic miss ratio %.2f, dynamic min miss %d, clip below floor %s, octomap %s, nice %d",
     m_node_config.map_clean_enabled ? "on" : "off", mc.voxel_size, mc.min_range, mc.max_range,
     mc.lidar_height, mc.floor_band, mc.dynamic_max_height, mc.floor_radius, mc.sparse_min_hits,
     mc.dynamic_miss_ratio, mc.dynamic_min_miss, mc.clip_below_floor ? "on" : "off",
-    m_node_config.map_clean_nice);
+    mc.octomap ? "on" : "off", m_node_config.map_clean_nice);
 
   // The names derived from the namespace, and the launch's overrides. A value
   // here without a robot_id prefix means the node was started bare (outside
@@ -1384,6 +1386,8 @@ std::string PGONode::startMapClean(const std::filesystem::path & map_dir, bool h
     std::to_string(oc.dynamic_min_miss),
     "--clip-below-floor",
     oc.clip_below_floor ? "1" : "0",
+    "--octomap",
+    oc.octomap ? "1" : "0",
     "--nice",
     std::to_string(m_node_config.map_clean_nice),
     "--started-at",
@@ -1507,6 +1511,10 @@ void PGONode::removeMapCleanOutputs(const std::filesystem::path & map_dir)
   // The cleaned map.pcd a killed clean may have left half-written. map.pcd
   // itself is the save's own output, written right after this.
   std::filesystem::remove(map_dir / (std::string(dynamic_removal::kMapFile) + ".tmp"), ec);
+  // The previous save's tree, and a half-written one: an octomap.bt left
+  // beside the new map.pcd would describe the old run.
+  std::filesystem::remove(map_dir / dynamic_removal::kOctomapFile, ec);
+  std::filesystem::remove(map_dir / (std::string(dynamic_removal::kOctomapFile) + ".tmp"), ec);
   // And the sidecar's per-process `map_clean.recipe.json.<pid>.tmp`.
   const std::string prefix = std::string(dynamic_removal::recipe::kSidecarFile) + ".";
   for (const auto & entry : std::filesystem::directory_iterator(map_dir, ec)) {

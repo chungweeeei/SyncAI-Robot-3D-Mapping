@@ -8,6 +8,10 @@
 //
 //   {"status":"converting","started_at":"<UTC>","params":{...}}
 //   {"status":"ok","started_at":..,"finished_at":..,"params":{...},"measurements":{...}}
+//
+// "ok" is about map.pcd. Whether octomap.bt was written too is
+// measurements.octomap_written, with measurements.octomap_error when a
+// requested tree was not (out of memory): the tree never fails the clean.
 //   {"status":"failed","started_at":..,"finished_at":..,"params":{...},"error":"<one line>"}
 //
 // "converting" is written by pgo_node BEFORE it spawns clean_map, so a reader

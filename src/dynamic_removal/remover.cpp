@@ -143,15 +143,16 @@ Scan worldScan(
   return s;
 }
 
-// The voxels one scan passes through without ending in them: OctoMap's own
-// discretized update (one ray per endpoint voxel, truncated at max_range),
-// plus the clipped rays up to their clip point. A voxel the scan also ends in
-// is not a miss, as in OctoMap's update, where occupied wins within a scan.
-void scanMisses(
+// The voxels one scan passes through without ending in them (free_cells) and
+// the ones it ends in (occupied_cells): OctoMap's own discretized update (one
+// ray per endpoint voxel, truncated at max_range, and an endpoint beyond it
+// not occupied -- pass 1's hit keys exactly), plus the clipped rays up to
+// their clip point. A voxel the scan also ends in is not a miss, as in
+// OctoMap's update, where occupied wins within a scan.
+void castScan(
   octomap::OcTree & tree, const Scan & s, const octomap::point3d & origin, double max_range,
-  octomap::KeySet & free_cells)
+  octomap::KeySet & free_cells, octomap::KeySet & occupied_cells)
 {
-  octomap::KeySet occupied_cells;
   tree.computeDiscreteUpdate(s.endpoints, origin, free_cells, occupied_cells, max_range);
   if (!s.clipped_ends.empty()) {
     octomap::KeyRay ray;
@@ -174,8 +175,14 @@ struct Counts
   uint32_t clipped = 0;
   uint32_t misses = 0;
   bool removed = false;
+  bool on_floor = false;  // within floor_band of its local floor
 };
 using CountMap = std::unordered_map<octomap::OcTreeKey, Counts, octomap::OcTreeKey::KeyHash>;
+
+fs::path tmpPath(const fs::path & dir, const char * name)
+{
+  return dir / (std::string(name) + ".tmp");
+}
 
 void savePcd(const fs::path & tmp, const pcl::PointCloud<pcl::PointXYZI> & cloud)
 {
@@ -190,11 +197,6 @@ void savePcd(const fs::path & tmp, const pcl::PointCloud<pcl::PointXYZI> & cloud
   }
 }
 
-fs::path tmpPath(const fs::path & dir)
-{
-  return dir / (std::string(kMapFile) + ".tmp");
-}
-
 bool cleanImpl(
   const fs::path & dir, const Params & params, Measurements & out, const Progress & progress)
 {
@@ -205,8 +207,9 @@ bool cleanImpl(
   std::vector<FloorRef> floors;
   readPoses(poses_path, params.lidar_height, poses, floors);
 
-  // For the key arithmetic and ray traversal only; never updated. Not const:
-  // computeDiscreteUpdate reuses scratch members of the tree.
+  // The key arithmetic and ray traversal, and with params.octomap the tree
+  // written as octomap.bt, filled in pass 2. Not const: computeDiscreteUpdate
+  // reuses scratch members of the tree.
   octomap::OcTree tree(params.voxel_size);
   const double band = params.floor_band, maxh = params.dynamic_max_height,
                rad = params.floor_radius;
@@ -249,23 +252,50 @@ bool cleanImpl(
   }
   if (out.keyframes == 0) throw InputError("no patch under patches/ could be read");
 
-  // ---- Pass 2: misses ----
+  // ---- Pass 2: misses, and the tree ----
   //
   // The same scans again, after pass 1 rather than inside it, so a voxel
   // first hit late still gets the misses of the scans that crossed it earlier.
+  //
+  // With params.octomap each scan also goes into the tree as
+  // insertPointCloud(..., discretize true) would put it -- one update per
+  // voxel per scan, free first, occupied winning -- reusing this pass's ray
+  // traversal, which is most of what a separate OctoMap build would cost.
+  // Lazy: inner nodes are brought up to date once, before the write. Not
+  // pruned along the way: on dp1f_1008_2_v2 a prune every 100 scans cut the
+  // peak from 2.0 to 1.5 GB but took the clean from 208 to 453 s, freshly
+  // collapsed nodes being expanded again by the next scans.
+  // Running out of memory here drops the tree, never the clean: map.pcd is
+  // what the 2D map is made from, the tree is an extra.
+  bool building = params.octomap;
+  auto dropTree = [&](const std::string & why) {
+    building = false;
+    tree.clear();
+    std::error_code ec;
+    fs::remove(tmpPath(dir, kOctomapFile), ec);
+    out.octomap_error = why;
+  };
   size_t done = 0;
   for (const auto & p : poses) {
     pcl::PointCloud<pcl::PointXYZI> cloud;
     Eigen::Quaterniond q;
     Eigen::Vector3d t;
     if (loadPatch(dir, p, cloud, q, t)) {
-      octomap::KeySet free_cells;
-      scanMisses(
+      octomap::KeySet free_cells, occupied_cells;
+      castScan(
         tree, worldScan(cloud, q, t, params), octomap::point3d(p.tx, p.ty, p.tz), params.max_range,
-        free_cells);
+        free_cells, occupied_cells);
       for (const auto & k : free_cells) {
         auto it = counts.find(k);
         if (it != counts.end()) ++it->second.misses;
+      }
+      if (building) {
+        try {
+          for (const auto & k : free_cells) tree.updateNode(k, false, true);
+          for (const auto & k : occupied_cells) tree.updateNode(k, true, true);
+        } catch (const std::bad_alloc &) {
+          dropTree("out of memory building the tree; try a coarser voxel_size");
+        }
       }
     }
     if (progress && !progress("misses", ++done, poses.size())) return false;
@@ -330,11 +360,70 @@ bool cleanImpl(
       dynamic = !std::isnan(fz) && v.z() >= fz + band && v.z() <= fz + maxh;
     }
     const bool on_floor = !std::isnan(fz) && std::fabs(v.z() - fz) <= band;
+    c.on_floor = on_floor;
     const bool sparse = !dynamic && !on_floor && params.sparse_min_hits > 1 &&
                         c.hits + c.clipped < (uint32_t)params.sparse_min_hits;
     if (!dynamic && !sparse) continue;
     c.removed = true;
     (dynamic ? out.dynamic_voxels : out.sparse_voxels)++;
+  }
+
+  // ---- The tree: cleaned, written, freed ----
+  //
+  // A removed voxel becomes what it would be had its hits never happened, so
+  // the tree agrees with the cleaned map.pcd and never claims more than was
+  // seen. Passed through by some scan: observed free, set to the clamping
+  // minimum -- where a person stood (dynamic voxels always have misses) is
+  // free space a planner may use. Never passed through: UNKNOWN, the node
+  // deleted. Most sparse voxels are that -- a reflection outside a window, a
+  // stray return behind a wall -- and setting them free would put islands of
+  // "observed free" where nothing was observed. A voxel only ever hit by
+  // clipped returns was never inserted and stays unknown likewise.
+  //
+  // A floor voxel a scan hit is set occupied whatever its misses, the floor
+  // band's exemption from the cleaning carried into the tree. The lidar sees
+  // the floor only at grazing angles, so every ray to a far floor point runs
+  // along the floor for metres before it ends and counts misses in the floor
+  // voxels other scans hit: on dp1f_1008_2_v2, 62 % of the floor voxels
+  // map.pcd has points in came out free, and under the path only 31 % of the
+  // 0.1 m columns had an occupied floor voxel (96 % with this). A planner
+  // looking for ground to drive on found holes everywhere.
+  //
+  // Freed before pass 3 so the tree and the map cloud are never in memory
+  // together.
+  if (building) {
+    try {
+      const float free_log = tree.getClampingThresMinLog();
+      const float occupied_log = tree.getClampingThresMaxLog();
+      for (const auto & [key, c] : counts) {
+        if (c.hits == 0) continue;
+        if (!c.removed) {
+          if (!c.on_floor) continue;
+          const auto * node = tree.search(key);
+          if (node && !tree.isNodeOccupied(node)) ++out.octomap_floor_restored;
+          tree.setNodeValue(key, occupied_log, true);
+        } else if (c.misses > 0) {
+          tree.setNodeValue(key, free_log, true);
+        } else {
+          tree.deleteNode(key);
+          ++out.octomap_unknown_voxels;
+        }
+      }
+      tree.updateInnerOccupancy();
+      // The non-const writeBinary converts the tree to max-likelihood and
+      // prunes it in place; the counts below are of what was written.
+      if (tree.writeBinary(tmpPath(dir, kOctomapFile).string())) {
+        for (auto it = tree.begin_leafs(); it != tree.end_leafs(); ++it) {
+          ++out.octomap_leaves;
+          (tree.isNodeOccupied(*it) ? out.octomap_occupied_leaves : out.octomap_free_leaves)++;
+        }
+        tree.clear();
+      } else {
+        dropTree(std::string("cannot write ") + kOctomapFile);
+      }
+    } catch (const std::bad_alloc &) {
+      dropTree("out of memory finishing the tree; try a coarser voxel_size");
+    }
   }
 
   // ---- Pass 3: map.pcd without the removed voxels ----
@@ -375,16 +464,24 @@ bool cleanImpl(
   }
   out.map_points_kept = map.size();
   if (map.empty()) throw std::runtime_error("cleaned map.pcd would be empty");
-  savePcd(tmpPath(dir), map);
+  savePcd(tmpPath(dir, kMapFile), map);
 
   // A save into this directory while the clean ran replaced poses.txt and
-  // patches/; renaming now would put a map built from the OLD save over it.
+  // patches/; renaming now would put outputs built from the OLD save over it.
   if (!(fingerprint(poses_path) == started_from)) {
     throw std::runtime_error("superseded: poses.txt changed during the clean (a newer save)");
   }
   std::error_code ec;
-  fs::rename(tmpPath(dir), dir / kMapFile, ec);
+  fs::rename(tmpPath(dir, kMapFile), dir / kMapFile, ec);
   if (ec) throw std::runtime_error(std::string("cannot rename ") + kMapFile + ": " + ec.message());
+  if (building) {
+    fs::rename(tmpPath(dir, kOctomapFile), dir / kOctomapFile, ec);
+    if (ec) {
+      dropTree(std::string("cannot rename ") + kOctomapFile + ": " + ec.message());
+    } else {
+      out.octomap_written = true;
+    }
+  }
   out.elapsed_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   return true;
 }
@@ -397,8 +494,10 @@ bool clean(
 {
   out = Measurements{};
   auto removeTmp = [&]() {
-    std::error_code ec;
-    std::filesystem::remove(tmpPath(dir), ec);
+    for (const char * name : {kMapFile, kOctomapFile}) {
+      std::error_code ec;
+      std::filesystem::remove(tmpPath(dir, name), ec);
+    }
   };
   try {
     const bool done = cleanImpl(dir, params, out, progress);

@@ -10,11 +10,13 @@ and PCL are far more mature there. Two executables:
   closure (small_gicp + `PlanarLoopFactor`), GTSAM iSAM2, the `map -> <robot_id>/pointlio_odom`
   TF, and the `start_mapping` / `save_maps` / `reset_mapping` services plus `mapping_status`.
 - `clean_map` (`dynamic_removal/`): the detached post-save job `pgo_node` spawns; it ray-casts
-  the saved patches (OctoMap voxel keys, no tree) and rewrites `map.pcd` without people and
-  one-off returns.
-  Its only outputs are `map.pcd` and `map_clean.recipe.json`. dev needs only the 3D `map.pcd`
-  (the 2D map is made from it downstream), so do not add an OctoMap export: OctoMap is used
-  purely as a library for voxel keys and ray traversal.
+  the saved patches and rewrites `map.pcd` without people and one-off returns. With
+  `map_clean_octomap` (default on) it also writes `octomap.bt` (free + occupied, built in the
+  same misses pass; never-seen space is unknown, removed voxels are free only if a ray passed
+  through them, hit floor-band voxels stay occupied against grazing rays) for `octomap_planner`'s 3D global paths. Its outputs
+  are `map.pcd`, `octomap.bt` and `map_clean.recipe.json`; the 2D map is made from `map.pcd`
+  downstream, so the tree must never fail the clean (out of memory drops it, `map.pcd` still
+  goes).
 
 `README.md` is the authoritative behaviour reference (the run lifecycle, threading, loop
 verification, cleaning `map.pcd`, gotchas). Read the relevant section before changing behaviour.

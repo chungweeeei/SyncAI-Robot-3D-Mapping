@@ -142,8 +142,9 @@
     # >= dynamic_min_miss times and >= dynamic_miss_ratio x as often as hit,
     # between floor + floor_band and floor + dynamic_max_height) and the
     # "sparse" ones (hit by < sparse_min_hits keyframes, outside the floor
-    # band: smear, edge returns, reflections). Progress and outcome:
-    # map_clean.recipe.json. The README's "Cleaning map.pcd" has the details.
+    # band: smear, edge returns, reflections), and writes octomap.bt beside it
+    # (map_clean_octomap). Progress and outcome: map_clean.recipe.json. The
+    # README's "Cleaning map.pcd" has the details.
     map_clean_enabled: true
     map_clean_voxel_size: 0.1        # voxel edge, m
     map_clean_max_range: 20.0        # judging range, not the lidar's; farther points are kept, m
@@ -159,4 +160,7 @@
     # of returns that land under a glossy floor (reflections) would otherwise
     # count misses for voxels physically under it.
     map_clean_clip_below_floor: true
+    # Also write octomap.bt (free + occupied, at map_clean_voxel_size) for
+    # octomap_planner's 3D global paths. Most of the clean's memory when on.
+    map_clean_octomap: true
     map_clean_nice: 10               # int, not 10.0
