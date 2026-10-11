@@ -13,6 +13,7 @@ using V3D = Eigen::Vector3d;
 using M3F = Eigen::Matrix3f;
 using V3F = Eigen::Vector3f;
 using M4F = Eigen::Matrix4f;
+using M4D = Eigen::Matrix4d;
 using V4F = Eigen::Vector4f;
 
 struct PoseWithTime

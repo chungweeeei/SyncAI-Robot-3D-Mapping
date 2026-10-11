@@ -104,25 +104,34 @@ add_executable(clean_map src/dynamic_removal/main.cpp)
 target_link_libraries(clean_map dynamic_removal dynamic_removal_recipe)
 
 # ---- pgo_node: the online pose graph (mapping session) ----------------------
-add_executable(pgo_node
-  src/main.cpp
-  src/pgo_node.cpp
+# The pose graph itself has no ROS dependency, so it is a library the unit
+# tests link as well.
+add_library(pgos STATIC
   src/pgos/commons.cpp
   src/pgos/pose_graph_optimizer.cpp
+  src/pgos/scan_context.cpp
 )
-target_include_directories(pgo_node PUBLIC
+target_include_directories(pgos PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
   ${EIGEN3_INCLUDE_DIR}
   ${PCL_INCLUDE_DIRS})
-ament_target_dependencies(pgo_node ${SYNCAI_MAPPING_DEPS} ament_index_cpp)
 # small_gicp::small_gicp carries OpenMP::OpenMP_CXX as a PUBLIC usage
 # requirement; without -fopenmp its omp pragmas are silently ignored and the
 # kd-tree / covariance estimation run single-threaded.
-target_link_libraries(pgo_node
+target_link_libraries(pgos PUBLIC
   ${PCL_LIBRARIES}
   gtsam
   small_gicp::small_gicp
+)
+
+add_executable(pgo_node
+  src/main.cpp
+  src/pgo_node.cpp
+)
+ament_target_dependencies(pgo_node ${SYNCAI_MAPPING_DEPS} ament_index_cpp)
+target_link_libraries(pgo_node
+  pgos
   dynamic_removal_recipe
   nlohmann_json::nlohmann_json
 )
@@ -151,6 +160,14 @@ if(BUILD_TESTING)
   # style contradicts on brace and continuation placement; running both can never pass.
   set(ament_cmake_uncrustify_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
+
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_scan_context test/test_scan_context.cpp)
+  target_link_libraries(test_scan_context pgos)
+  # A synthetic building driven around twice with drifting odometry: loop
+  # closure end to end (candidates, GICP, gates, robust graph). Slow-ish.
+  ament_add_gtest(test_loop_closure test/test_loop_closure.cpp TIMEOUT 300)
+  target_link_libraries(test_loop_closure pgos)
 endif()
 
 ament_package()
