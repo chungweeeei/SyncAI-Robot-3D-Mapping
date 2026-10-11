@@ -150,7 +150,10 @@ many **passed through** it (M), and rewrites `map.pcd` without two classes of po
 `converting` with the raw map. **A 2D map made while it says `converting` came from the raw map**;
 redo it once it reads `ok`.
 
-Run by hand to re-clean any save with patches:
+Run by hand to re-clean any save with `patches/` + `poses.txt`, which is also how to convert one to
+`octomap.bt` offline. It rewrites `map.pcd` too, identically for the same params (it re-cleans from
+the raw patches). A bare `map.pcd` cannot be converted: without scan origins there is no free
+space.
 
 ```bash
 ros2 run syncai_mapping clean_map map/<name>
