@@ -134,7 +134,10 @@ many **passed through** it (M), and rewrites `map.pcd` without two classes of po
   the misses pass, which already ray-casts every scan. Space no ray reached (behind walls, under
   the floor) has no node, i.e. is **unknown**. It agrees with the cleaned `map.pcd`: a removed
   voxel is free if a ray passed through it (where a person stood) and unknown if none did (a
-  reflection outside a window). On dp1f_1008_2_v2 (2004 keyframes) it took the clean from
+  reflection outside a window). **A hit floor voxel stays occupied**, like the floor band's
+  exemption from the cleaning: the lidar sees the floor only at grazing angles, and the rays to
+  far floor points otherwise carve the near floor free (under the path only 31 % of the floor
+  columns were occupied on dp1f_1008_2_v2; 96 % with this). On dp1f_1008_2_v2 (2004 keyframes) it took the clean from
   142 s to 208 s and its peak memory from 1.0 to 2.0 GB, for a 2.8 MB file. A tree that runs out of
   memory is dropped and `map.pcd` is still cleaned.
 - **Process model.** A detached child process (`posix_spawn`, own session, `nice`), so it survives

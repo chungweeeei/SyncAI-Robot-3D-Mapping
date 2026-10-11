@@ -275,7 +275,8 @@ int main(int argc, char ** argv)
                 << " map_points_kept=" << m.map_points_kept << " clipped_rays=" << m.clipped_rays
                 << " octomap_leaves=" << m.octomap_leaves
                 << " (occupied=" << m.octomap_occupied_leaves << " free=" << m.octomap_free_leaves
-                << ") octomap_unknown_voxels=" << m.octomap_unknown_voxels << " in " << m.elapsed_s
+                << ") octomap_unknown_voxels=" << m.octomap_unknown_voxels
+                << " octomap_floor_restored=" << m.octomap_floor_restored << " in " << m.elapsed_s
                 << " s" << std::endl;
       if (params.octomap && !m.octomap_written) {
         std::cerr << "[clean_map] map.pcd cleaned but no " << dr::kOctomapFile << ": "

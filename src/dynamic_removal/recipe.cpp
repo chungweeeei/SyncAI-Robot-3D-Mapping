@@ -96,6 +96,7 @@ std::string ok(
   mj["octomap_occupied_leaves"] = m.octomap_occupied_leaves;
   mj["octomap_free_leaves"] = m.octomap_free_leaves;
   mj["octomap_unknown_voxels"] = m.octomap_unknown_voxels;
+  mj["octomap_floor_restored"] = m.octomap_floor_restored;
   if (!m.octomap_error.empty()) mj["octomap_error"] = m.octomap_error;
   mj["elapsed_s"] = m.elapsed_s;
   return dump(j);

@@ -110,7 +110,8 @@ struct Params
   // Also write kOctomapFile, at voxel_size, from the same scans (free space up
   // to max_range, occupied where a scan ended, removed voxels free when a ray
   // passed through them and unknown when none did; never-seen space has no
-  // node, i.e. is unknown). The
+  // node, i.e. is unknown; a hit floor voxel stays occupied, since grazing
+  // rays would otherwise carve the floor away). The
   // tree is what the clean's memory is then mostly made of: every voxel a ray
   // crossed. A tree that runs out of memory is dropped and map.pcd is still
   // cleaned; the sidecar's octomap_error says so.
@@ -133,6 +134,7 @@ struct Measurements
   size_t octomap_occupied_leaves = 0;
   size_t octomap_free_leaves = 0;
   size_t octomap_unknown_voxels = 0;  // removed voxels no ray passed through: deleted
+  size_t octomap_floor_restored = 0;  // hit floor voxels the misses had made free
   std::string octomap_error;          // why a requested tree was not written; "" otherwise
   double elapsed_s = 0.0;
 };

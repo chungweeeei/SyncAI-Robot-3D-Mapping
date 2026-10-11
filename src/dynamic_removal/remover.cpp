@@ -175,6 +175,7 @@ struct Counts
   uint32_t clipped = 0;
   uint32_t misses = 0;
   bool removed = false;
+  bool on_floor = false;  // within floor_band of its local floor
 };
 using CountMap = std::unordered_map<octomap::OcTreeKey, Counts, octomap::OcTreeKey::KeyHash>;
 
@@ -359,6 +360,7 @@ bool cleanImpl(
       dynamic = !std::isnan(fz) && v.z() >= fz + band && v.z() <= fz + maxh;
     }
     const bool on_floor = !std::isnan(fz) && std::fabs(v.z() - fz) <= band;
+    c.on_floor = on_floor;
     const bool sparse = !dynamic && !on_floor && params.sparse_min_hits > 1 &&
                         c.hits + c.clipped < (uint32_t)params.sparse_min_hits;
     if (!dynamic && !sparse) continue;
@@ -376,14 +378,31 @@ bool cleanImpl(
   // deleted. Most sparse voxels are that -- a reflection outside a window, a
   // stray return behind a wall -- and setting them free would put islands of
   // "observed free" where nothing was observed. A voxel only ever hit by
-  // clipped returns was never inserted and stays unknown likewise. Freed
-  // before pass 3 so the tree and the map cloud are never in memory together.
+  // clipped returns was never inserted and stays unknown likewise.
+  //
+  // A floor voxel a scan hit is set occupied whatever its misses, the floor
+  // band's exemption from the cleaning carried into the tree. The lidar sees
+  // the floor only at grazing angles, so every ray to a far floor point runs
+  // along the floor for metres before it ends and counts misses in the floor
+  // voxels other scans hit: on dp1f_1008_2_v2, 62 % of the floor voxels
+  // map.pcd has points in came out free, and under the path only 31 % of the
+  // 0.1 m columns had an occupied floor voxel (96 % with this). A planner
+  // looking for ground to drive on found holes everywhere.
+  //
+  // Freed before pass 3 so the tree and the map cloud are never in memory
+  // together.
   if (building) {
     try {
       const float free_log = tree.getClampingThresMinLog();
+      const float occupied_log = tree.getClampingThresMaxLog();
       for (const auto & [key, c] : counts) {
-        if (!c.removed || c.hits == 0) continue;
-        if (c.misses > 0) {
+        if (c.hits == 0) continue;
+        if (!c.removed) {
+          if (!c.on_floor) continue;
+          const auto * node = tree.search(key);
+          if (node && !tree.isNodeOccupied(node)) ++out.octomap_floor_restored;
+          tree.setNodeValue(key, occupied_log, true);
+        } else if (c.misses > 0) {
           tree.setNodeValue(key, free_log, true);
         } else {
           tree.deleteNode(key);
