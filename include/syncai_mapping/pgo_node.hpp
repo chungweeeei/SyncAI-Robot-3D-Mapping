@@ -209,8 +209,9 @@ public:
   // its input. Not waited for; the reaper logs it, and the clean's own
   // poses.txt fingerprint stops it from renaming anything over the new save.
   void stopMapCleanFor(const std::filesystem::path & map_dir);
-  // The sidecar of an earlier save into the same directory and the clean's
-  // .tmp files: their input (patches/, poses.txt) is about to be replaced.
+  // The sidecar and octomap.bt of an earlier save into the same directory and
+  // the clean's .tmp files: their input (patches/, poses.txt) is about to be
+  // replaced.
   static void removeMapCleanOutputs(const std::filesystem::path & map_dir);
 
   // 50 ms timer: keyframe selection, loop search, smoothing, TF, outputs.

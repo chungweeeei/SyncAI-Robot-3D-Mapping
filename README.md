@@ -11,7 +11,8 @@ It has two executables:
   and serves `start_mapping`, `save_maps` and `reset_mapping`. It runs only in the mapping
   session; in navigation `syncai_localizer` owns the same TF.
 - **`clean_map`**: a detached job `pgo_node` starts after each save. It rewrites the saved
-  `map.pcd` without people and one-off returns.
+  `map.pcd` without people and one-off returns, and writes `octomap.bt`, the occupancy tree
+  `octomap_planner` plans 3D global paths on.
 
 ```
    syncai_pointlio            /<id>/pointlio/{body_cloud_dense, lio_odom}
@@ -28,7 +29,7 @@ It has two executables:
         │                      /dev/shm/…      (ends the run)                 RESETTING
         │                      (backend preview)    │
         │                                           ▼
-        │                                       clean_map ──► map.pcd (cleaned)
+        │                                       clean_map ──► map.pcd (cleaned), octomap.bt
 ```
 
 Source layout: `src/pgos/` is the pose graph (upstream-derived, MIT), `src/pgo_node.cpp` is the
@@ -98,6 +99,7 @@ notice:
 | `patches/<i>.pcd` | (with `save_patches`) one body-frame cloud per keyframe |
 | `poses.txt` | (with `save_patches`) `<i>.pcd tx ty tz qw qx qy qz` per keyframe |
 | `map_clean.recipe.json` | (with `save_patches` and `map_clean_enabled`) the cleaning status |
+| `octomap.bt` | written later by `clean_map` (with `map_clean_octomap`); a save deletes the previous one first |
 
 No file names the map or holds an absolute path, so a map directory can be renamed freely.
 
@@ -127,14 +129,21 @@ many **passed through** it (M), and rewrites `map.pcd` without two classes of po
   structure; people near the path are judged from closer keyframes anyway.
 - **Rays stop at the floor** (`clip_below_floor`), so reflections under a glossy floor do not
   carve away voxels below it.
-- **Output is PCD only**: `map.pcd` and the recipe. OctoMap is used only for voxel keys and ray
-  traversal; no octree or OctoMap file is produced.
+- **`octomap.bt`** (`map_clean_octomap`): the same scans in an `OcTree` at `voxel_size`, free space
+  as well as occupied, since a planner must tell observed-free from never-seen. It is filled in
+  the misses pass, which already ray-casts every scan. Space no ray reached (behind walls, under
+  the floor) has no node, i.e. is **unknown**. It agrees with the cleaned `map.pcd`: a removed
+  voxel is free if a ray passed through it (where a person stood) and unknown if none did (a
+  reflection outside a window). On dp1f_1008_2_v2 (2004 keyframes) it took the clean from
+  142 s to 208 s and its peak memory from 1.0 to 2.0 GB, for a 2.8 MB file. A tree that runs out of
+  memory is dropped and `map.pcd` is still cleaned.
 - **Process model.** A detached child process (`posix_spawn`, own session, `nice`), so it survives
   a mode switch and the OOM killer picks it before `pgo_node`. One clean runs per host (a `flock` on
   `/dev/shm/syncai_pgo/clean_map.lock`). A new save into the same directory stops the old clean.
 
 **Status** is `map_clean.recipe.json`: `converting` → `ok` / `failed`, with `started_at`,
-`finished_at`, the `params` used and, on `ok`, the `measurements`. A hard kill leaves it at
+`finished_at`, the `params` used and, on `ok`, the `measurements`; `octomap_written` says whether
+`octomap.bt` came with it (`octomap_error` says why not). A hard kill leaves it at
 `converting` with the raw map. **A 2D map made while it says `converting` came from the raw map**;
 redo it once it reads `ok`.
 
@@ -145,7 +154,7 @@ ros2 run syncai_mapping clean_map map/<name>
 ros2 run syncai_mapping clean_map map/<name> --lock none --dynamic-min-miss 0   # sparse rule only
 #   --voxel-size 0.1 --max-range 20 --min-range 0.5 --lidar-height 0.481 --floor-band 0.25
 #   --dynamic-max-height 2.0 --floor-radius 10 --sparse-min-hits 2 --dynamic-miss-ratio 2.0
-#   --dynamic-min-miss 3 --clip-below-floor 1 --nice 0 --started-at <ISO-8601>
+#   --dynamic-min-miss 3 --clip-below-floor 1 --octomap 1 --nice 0 --started-at <ISO-8601>
 # exit 0 ok · 1 usage · 2 no poses.txt / readable patch · 3 failed · 4 interrupted
 cat map/<name>/map_clean.recipe.json
 ```
@@ -233,6 +242,7 @@ default silently.
 | `map_clean_dynamic_miss_ratio` / `map_clean_dynamic_min_miss` | `2.0` / `3` | dynamic rule; `min_miss` is an **int**, `<= 0` = off |
 | `map_clean_sparse_min_hits` | `2` | **int**, sparse rule; `<= 1` = off |
 | `map_clean_clip_below_floor` | `true` | stop rays at the floor |
+| `map_clean_octomap` | `true` | also write `octomap.bt` |
 | `map_clean_nice` | `10` | **int**, the clean's nice value |
 
 Every value is a double unless marked int or string (the `true` / `false` switches are bools). **Write doubles with a decimal point** (`10.0`): a bare

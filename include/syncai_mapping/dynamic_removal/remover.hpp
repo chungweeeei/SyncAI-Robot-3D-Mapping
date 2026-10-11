@@ -16,10 +16,12 @@
 // have deleted real wall at every revisit. Both exist only after the save.
 //
 // Prototyped as part of the OctoMap display build on
-// feat/mapping-octomap-loop-noise (octomap_builder.cpp); this is its cleaning
-// half without the OctoMap outputs. OctoMap is still used, but only for its
-// key arithmetic and ray traversal: no tree is ever built, so the memory is
-// the hit-voxel hash map alone.
+// feat/mapping-octomap-loop-noise (octomap_builder.cpp). With Params::octomap
+// on it also writes octomap.bt, the occupancy tree octomap_planner plans 3D
+// global paths on: the misses pass already ray-casts every scan, so the tree
+// costs its memory and the node updates, not a second ray-cast. With it off,
+// OctoMap is used only for its key arithmetic and ray traversal and the
+// memory is the hit-voxel hash map alone.
 //
 // This header deliberately includes no OctoMap or PCL header: pgo_node
 // includes it for Params (its ROS parameters) and the file names, and links
@@ -39,6 +41,12 @@ namespace syncai_mapping::dynamic_removal
 // (an open reader keeps the old file). patches/ stay raw: they are the input,
 // and a rerun by hand re-derives the cleaned map from them.
 inline constexpr const char * kMapFile = "map.pcd";
+// With Params::octomap: the occupancy tree of the same save, written beside
+// map.pcd (octomap.bt.tmp + rename). It holds free space as well as occupied
+// -- a planner must tell observed-free from never-seen, and never-seen is
+// unknown (no node) -- and agrees with the cleaned map.pcd: a voxel removed
+// from map.pcd is free in the tree if a ray passed through it, else unknown.
+inline constexpr const char * kOctomapFile = "octomap.bt";
 
 // One field per CLI flag, per pgo_node ROS parameter (map_clean_<name>) and
 // per key of the sidecar's "params" object. Defaults are mapping_params.yaml's.
@@ -99,6 +107,14 @@ struct Params
   // sparse_min_hits, so a one-off reflection leaves map.pcd while a lower level seen
   // from many keyframes (stairs down) stays.
   bool clip_below_floor = true;
+  // Also write kOctomapFile, at voxel_size, from the same scans (free space up
+  // to max_range, occupied where a scan ended, removed voxels free when a ray
+  // passed through them and unknown when none did; never-seen space has no
+  // node, i.e. is unknown). The
+  // tree is what the clean's memory is then mostly made of: every voxel a ray
+  // crossed. A tree that runs out of memory is dropped and map.pcd is still
+  // cleaned; the sidecar's octomap_error says so.
+  bool octomap = true;
 };
 
 struct Measurements
@@ -111,6 +127,13 @@ struct Measurements
   size_t sparse_voxels = 0;
   size_t map_points_removed = 0;
   size_t map_points_kept = 0;
+  // The tree as written (after pruning); zero without Params::octomap.
+  bool octomap_written = false;
+  size_t octomap_leaves = 0;
+  size_t octomap_occupied_leaves = 0;
+  size_t octomap_free_leaves = 0;
+  size_t octomap_unknown_voxels = 0;  // removed voxels no ray passed through: deleted
+  std::string octomap_error;          // why a requested tree was not written; "" otherwise
   double elapsed_s = 0.0;
 };
 
@@ -128,10 +151,11 @@ public:
 };
 
 // Read <dir>/poses.txt + <dir>/patches/, count and classify, and replace
-// <dir>/map.pcd (map.pcd.tmp + rename, the .tmp removed on failure).
+// <dir>/map.pcd -- and with Params::octomap write <dir>/octomap.bt -- each
+// via .tmp + rename, the .tmp files removed on failure.
 // poses.txt is fingerprinted at the start and re-checked before the rename: a
 // save into the same directory mid-clean fails this one ("superseded")
-// instead of letting it rename the OLD save's map over the new one. Throws
+// instead of letting it rename the OLD save's outputs over the new one. Throws
 // InputError or std::runtime_error, whose what() names files RELATIVE to dir
 // only -- it ends up in the sidecar, which must hold no absolute path.
 bool clean(
