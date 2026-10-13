@@ -3,14 +3,14 @@
 //   clean_map <map_dir> [--voxel-size 0.1] [--max-range 20] [--min-range 0.5]
 //       [--lidar-height 0.481] [--floor-band 0.25] [--dynamic-max-height 2.0]
 //       [--floor-radius 10] [--sparse-min-hits 2] [--dynamic-miss-ratio 2.0]
-//       [--dynamic-min-miss 3] [--clip-below-floor 1] [--octomap 1] [--floor-fill-radius 3]
+//       [--dynamic-min-miss 3] [--clip-below-floor 1] [--octomap 0] [--floor-fill-radius 3]
 //       [--nice 0]
 //       [--lock <path>|none] [--started-at <ISO-8601>]
 //
 // pgo_node spawns it after a successful save_maps with save_patches
 // (detached, nice 10); run by hand it re-cleans any saved map from its
 // patches: `ros2 run syncai_mapping clean_map map/<name>`. It REPLACES
-// map.pcd, writes octomap.bt beside it (unless --octomap 0) and writes
+// map.pcd, writes octomap.bt beside it (with --octomap 1) and writes
 // map_clean.recipe.json itself, from "converting" to "ok" / "failed", so its
 // outcome survives the node that started it.
 //
@@ -59,7 +59,7 @@ void usage()
                "         [--lidar-height 0.481] [--floor-band 0.25] [--dynamic-max-height 2.0] "
                "[--floor-radius 10]\n"
                "         [--sparse-min-hits 2] [--dynamic-miss-ratio 2.0] [--dynamic-min-miss 3]\n"
-               "         [--clip-below-floor 1] [--octomap 1] [--floor-fill-radius 3]\n"
+               "         [--clip-below-floor 1] [--octomap 0] [--floor-fill-radius 3]\n"
                "         [--nice 0] [--lock /dev/shm/syncai_pgo/clean_map.lock|none] "
                "[--started-at <ISO-8601 UTC>]\n";
 }

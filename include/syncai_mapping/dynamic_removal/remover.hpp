@@ -115,7 +115,7 @@ struct Params
   // tree is what the clean's memory is then mostly made of: every voxel a ray
   // crossed. A tree that runs out of memory is dropped and map.pcd is still
   // cleaned; the sidecar's octomap_error says so.
-  bool octomap = true;
+  bool octomap = false;
   // Floor inferred in the tree (not in map.pcd) up to this far (m) from a
   // keyframe on the same level; <= 0 turns it off. The lidar samples the
   // floor too thinly in the shadows of shelves and walls a few metres out,
