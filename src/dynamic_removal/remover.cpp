@@ -473,7 +473,18 @@ bool cleanImpl(
   // floor that is simply the nearest keyframe. Under a second floor the
   // xy-nearest keyframe is often upstairs: on the prototype, 51 of the 54 1F
   // cells it got wrong on dp1f_1008_2 lay under 2F and took 2F's floor, 5 m off.
-  constexpr double kLevelTol = 1.0;  // m; well under any storey height
+  //
+  // Up to dynamic_max_height above the nearest qualifying keyframe's floor, a
+  // level competes only if one of its keyframes is within kLevelReach of that
+  // keyframe's distance. "Highest" is meant for a storey
+  // overhead, whose path runs nearby; without the limit it also picked a stair
+  // landing 9 m away. On dp1f_1012 the landing at (-5.3, -15.3), 1.46 m above
+  // 1F, became the floor of the 1F corridor around (1, -8.5) although the
+  // robot drove through it: z 0.9-1.4 there fell in that floor band, exempt
+  // from the cleaning, and people's torsos stayed in map.pcd and occupied in
+  // octomap.bt along the whole corridor.
+  constexpr double kLevelTol = 1.0;    // m; well under any storey height
+  constexpr double kLevelReach = 3.0;  // m
   struct CellFloor
   {
     double f, d2;
@@ -497,12 +508,36 @@ bool cleanImpl(
     auto hi = std::upper_bound(
       v.begin(), v.end(), z + band, [](double val, const CellFloor & c) { return val < c.f; });
     if (hi == v.begin()) return (double)NAN;
-    const double top = (hi - 1)->f;
+    double dmin2 = std::numeric_limits<double>::max(), fnear = NAN;
+    for (auto c = v.begin(); c != hi; ++c) {
+      if (c->d2 < dmin2) {
+        dmin2 = c->d2;
+        fnear = c->f;
+      }
+    }
+    // Only where the voxel could be a person on the nearest keyframe's level.
+    // Higher up it cannot, and a storey's floor far from that storey's own
+    // path but over the lower one's needs the higher level to stay floor.
+    double reach2 = std::numeric_limits<double>::max();
+    if (z <= fnear + maxh) {
+      const double reach = std::sqrt(dmin2) + kLevelReach;
+      reach2 = reach * reach;
+    }
+    // The highest level within reach, then its nearest keyframe. The nearest
+    // qualifying keyframe is itself within reach, so there always is one.
+    double top = NAN;
+    for (auto c = hi; c != v.begin();) {
+      --c;
+      if (c->d2 <= reach2) {
+        top = c->f;
+        break;
+      }
+    }
     double best = std::numeric_limits<double>::max(), fz = NAN;
     for (auto c = hi; c != v.begin();) {
       --c;
       if (c->f < top - kLevelTol) break;
-      if (c->d2 < best) {
+      if (c->d2 <= reach2 && c->d2 < best) {
         best = c->d2;
         fz = c->f;
       }

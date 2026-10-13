@@ -123,7 +123,11 @@ many **passed through** it (M), and rewrites `map.pcd` without two classes of po
 - **Input is `patches/` + `poses.txt`**, not `map.pcd`, because rays need each scan's origin. No
   patches, no clean. `patches/` stay raw, so a rerun is idempotent.
 - **The floor band is exempt** from both rules (the floor is sampled thinly). The floor height is
-  taken per level from nearby keyframes, within `floor_radius`.
+  taken per level from nearby keyframes, within `floor_radius`: the highest level at or below the
+  voxel. Where the voxel could be a person on the nearest keyframe's level (up to
+  `dynamic_max_height` above it), only levels with a keyframe within 3 m of the nearest one's
+  distance count, so a stair landing metres away does not become the floor of the corridor beside
+  it.
 - **Only points within `max_range` (20 m) are judged.** Farther points are kept, not removed. A
   larger value judges sparse, far returns and long, error-prone rays, which removes real
   structure; people near the path are judged from closer keyframes anyway.
