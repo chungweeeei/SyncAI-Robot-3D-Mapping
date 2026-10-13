@@ -38,6 +38,7 @@ Json paramsJson(const Params & p)
   j["min_range"] = p.min_range;
   j["lidar_height"] = p.lidar_height;
   j["floor_band"] = p.floor_band;
+  j["floor_band_dynamic"] = p.floor_band_dynamic;
   j["dynamic_max_height"] = p.dynamic_max_height;
   j["floor_radius"] = p.floor_radius;
   j["sparse_min_hits"] = p.sparse_min_hits;

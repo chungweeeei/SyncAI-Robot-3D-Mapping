@@ -377,8 +377,8 @@ bool cleanImpl(
   // written as octomap.bt, filled in pass 2. Not const: computeDiscreteUpdate
   // reuses scratch members of the tree.
   octomap::OcTree tree(params.voxel_size);
-  const double band = params.floor_band, maxh = params.dynamic_max_height,
-               rad = params.floor_radius;
+  const double band = params.floor_band, dyn_band = params.floor_band_dynamic,
+               maxh = params.dynamic_max_height, rad = params.floor_radius;
   CountMap counts;
 
   // ---- Pass 1: hits ----
@@ -558,7 +558,7 @@ bool cleanImpl(
     if (
       params.dynamic_min_miss > 0 && c.hits > 0 && c.misses >= (uint32_t)params.dynamic_min_miss &&
       c.misses >= params.dynamic_miss_ratio * c.hits) {
-      dynamic = !std::isnan(fz) && v.z() >= fz + band && v.z() <= fz + maxh;
+      dynamic = !std::isnan(fz) && v.z() >= fz + dyn_band && v.z() <= fz + maxh;
     }
     const bool on_floor = !std::isnan(fz) && std::fabs(v.z() - fz) <= band;
     c.on_floor = on_floor;

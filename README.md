@@ -115,7 +115,7 @@ many **passed through** it (M), and rewrites `map.pcd` without two classes of po
 
 | Class | Rule | Catches |
 |---|---|---|
-| dynamic | `M >= dynamic_min_miss` (3) and `M >= dynamic_miss_ratio × H` (2.0), between floor + `floor_band` and floor + `dynamic_max_height` | people |
+| dynamic | `M >= dynamic_min_miss` (3) and `M >= dynamic_miss_ratio × H` (2.0), between floor + `floor_band_dynamic` (0.1) and floor + `dynamic_max_height` | people, their feet included |
 | sparse | `H < sparse_min_hits` (2), outside the floor band | smear, edge returns, reflections |
 
 - **Offline on purpose.** A person shows up only once a later scan sees through them, and the
@@ -173,7 +173,7 @@ origins there is no free space.
 ros2 run syncai_mapping clean_map map/<name>
 ros2 run syncai_mapping clean_map map/<name> --lock none --dynamic-min-miss 0   # sparse rule only
 ros2 run syncai_mapping clean_map map/<name> --octomap 1                        # also octomap.bt
-#   --voxel-size 0.1 --max-range 20 --min-range 0.5 --lidar-height 0.481 --floor-band 0.25
+#   --voxel-size 0.1 --max-range 20 --min-range 0.5 --lidar-height 0.481 --floor-band 0.25 --floor-band-dynamic 0.1
 #   --dynamic-max-height 2.0 --floor-radius 10 --sparse-min-hits 2 --dynamic-miss-ratio 2.0
 #   --dynamic-min-miss 3 --clip-below-floor 1 --octomap 0 --floor-fill-radius 3 --nice 0
 #   --started-at <ISO-8601>
@@ -259,6 +259,7 @@ default silently.
 | `map_clean_max_range` / `map_clean_min_range` | `20.0` / `0.5` | m, judging range / robot-body cut-off. Points outside are not judged and stay in `map.pcd`. `max_range` is not the lidar's range; keep it below it |
 | `map_clean_lidar_height` | `0.481` | m, lidar above the floor |
 | `map_clean_floor_band` | `0.25` | m, band around the floor exempt from both rules |
+| `map_clean_floor_band_dynamic` | `0.1` | m, the dynamic rule's own exemption: above this the rule applies inside `floor_band` too. People's feet and ankles sit 0.1–0.25 m up and stayed in the map at every stop (dp1f_1012: the operator's, seen once from 3 m ahead, passed through 30–40 times); the floor itself lies within a voxel of the local floor |
 | `map_clean_floor_radius` | `10.0` | m, keyframes within this set a cell's floor |
 | `map_clean_dynamic_max_height` | `2.0` | m, top of the people window |
 | `map_clean_dynamic_miss_ratio` / `map_clean_dynamic_min_miss` | `2.0` / `3` | dynamic rule; `min_miss` is an **int**, `<= 0` = off |

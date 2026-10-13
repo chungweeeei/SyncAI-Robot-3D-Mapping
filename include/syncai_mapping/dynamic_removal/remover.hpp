@@ -76,6 +76,15 @@ struct Params
   // and grazing rays carve real floor voxels "free", which would read as
   // dynamic.
   double floor_band = 0.25;
+  // The dynamic rule's own, narrower exemption: a voxel more than this above
+  // the local floor is judged dynamic like any other, floor_band or not.
+  // People's feet and ankles sit 0.1-0.25 m up, inside floor_band, and on
+  // dp1f_1012 the operator's, seen once from 3 m ahead and passed through
+  // 30-40 times, stayed in map.pcd at every stop as 0.3 m clusters that the
+  // planner inflated into blocked discs on the robot's own track. The floor
+  // itself lies within a voxel of the local floor, so it keeps the exemption
+  // it needs against grazing rays; the sparse rule keeps the full band.
+  double floor_band_dynamic = 0.10;
   // People are looked for up to floor + dynamic_max_height (m).
   double dynamic_max_height = 2.0;
   // The local floor comes from keyframes within this radius (m) of a 1 m cell.

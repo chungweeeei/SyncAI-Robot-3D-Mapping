@@ -1,7 +1,7 @@
 // clean_map: the post-save map cleaning for one pgo save directory.
 //
 //   clean_map <map_dir> [--voxel-size 0.1] [--max-range 20] [--min-range 0.5]
-//       [--lidar-height 0.481] [--floor-band 0.25] [--dynamic-max-height 2.0]
+//       [--lidar-height 0.481] [--floor-band 0.25] [--floor-band-dynamic 0.1] [--dynamic-max-height 2.0]
 //       [--floor-radius 10] [--sparse-min-hits 2] [--dynamic-miss-ratio 2.0]
 //       [--dynamic-min-miss 3] [--clip-below-floor 1] [--octomap 0] [--floor-fill-radius 3]
 //       [--nice 0]
@@ -56,7 +56,8 @@ void usage()
 {
   std::cerr << "usage: clean_map <map_dir> [--voxel-size 0.1] [--max-range 20] "
                "[--min-range 0.5]\n"
-               "         [--lidar-height 0.481] [--floor-band 0.25] [--dynamic-max-height 2.0] "
+               "         [--lidar-height 0.481] [--floor-band 0.25] [--floor-band-dynamic 0.1] "
+               "[--dynamic-max-height 2.0] "
                "[--floor-radius 10]\n"
                "         [--sparse-min-hits 2] [--dynamic-miss-ratio 2.0] [--dynamic-min-miss 3]\n"
                "         [--clip-below-floor 1] [--octomap 0] [--floor-fill-radius 3]\n"
@@ -155,6 +156,8 @@ int main(int argc, char ** argv)
       good = parseDouble(v, params.lidar_height);
     } else if (a == "--floor-band") {
       good = parseDouble(v, params.floor_band);
+    } else if (a == "--floor-band-dynamic") {
+      good = parseDouble(v, params.floor_band_dynamic);
     } else if (a == "--dynamic-max-height") {
       good = parseDouble(v, params.dynamic_max_height);
     } else if (a == "--floor-radius") {
