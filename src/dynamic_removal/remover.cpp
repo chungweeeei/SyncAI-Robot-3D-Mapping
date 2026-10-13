@@ -207,7 +207,12 @@ void savePcd(const fs::path & tmp, const pcl::PointCloud<pcl::PointXYZI> & cloud
 //    floor or an obstacle lies within kFillGap on BOTH sides. That is the
 //    shadow behind a shelf or along a wall, not open space on one side of
 //    the floor: grown outward instead, the fill ran through every door,
-//    window and glass front into fans of "floor" outside the building,
+//    window and glass front into fans of "floor" outside the building.
+//    kFillGap was 1.5 m until a pool on dp1f_1012 (1.6 m between its rims,
+//    water returns nothing, not even below the floor) was filled 0.85 m in
+//    from the walkway at a 3 m radius and all the way across at 6 m: a gap
+//    at most 2 * kFillGap wide is closed, so a pool or a pit only one rim
+//    away still counts as enclosed,
 //  - some voxel up to kFillClearance above it is observed free (a ray went
 //    over it: open floor in view, not behind a wall or under a shelf no ray
 //    reached) and none from two voxels up is occupied (a floor surface often
@@ -219,7 +224,7 @@ void savePcd(const fs::path & tmp, const pcl::PointCloud<pcl::PointXYZI> & cloud
 // It grows from hit floor only, so it never makes an island.
 constexpr double kFillClearance = 0.5;  // m
 constexpr double kFillDropDepth = 1.0;  // m
-constexpr double kFillGap = 1.5;        // m
+constexpr double kFillGap = 0.6;        // m
 
 size_t fillFloor(
   octomap::OcTree & tree, const CountMap & counts, const std::vector<FloorRef> & floors,

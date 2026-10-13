@@ -148,8 +148,8 @@ many **passed through** it (M), and rewrites `map.pcd` without two classes of po
   (the shadows of shelves and walls, sampled too thinly), and a legged robot's planner needs ground
   under every step. The tree (not `map.pcd`) gets those gaps closed at the height of the floor next
   to them: a column within that radius of a keyframe on the same level, **enclosed** (hit floor or
-  an obstacle within 1.5 m on both sides along some line), with space up to 0.5 m above seen free
-  and empty and nothing hit up to 1 m below (a stair down, a drop). Enclosed, not grown outward:
+  an obstacle within 0.6 m on both sides along some line, so a pool or pit wider than 1.2 m stays a
+  hole), with space up to 0.5 m above seen free and empty and nothing hit up to 1 m below (a stair down, a drop). Enclosed, not grown outward:
   grown outward it ran through doors, windows and glass fronts into fans of floor outside the
   building. On dp1f_1008_2_v2 it adds 43 k voxels; of the columns with open space above, 89 % (1-2
   m from the path) and 71 % (2-3 m) then have floor, from 72 % and 40 %. A hole no ray looked into
