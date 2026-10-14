@@ -21,6 +21,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "syncai_mapping/dynamic_removal/edits.hpp"
+
 namespace syncai_mapping::dynamic_removal
 {
 
@@ -634,6 +636,9 @@ bool cleanImpl(
       dropTree(std::string("cannot rename ") + kOctomapFile + ": " + ec.message());
     } else {
       out.octomap_written = true;
+      // The new tree is the one apply_octomap_edits starts from; the copy it
+      // set aside of the old one would have it patch a stale tree.
+      fs::remove(dir / edits::kRawOctomapFile, ec);
     }
   }
   out.elapsed_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
