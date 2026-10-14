@@ -4,7 +4,7 @@ The ROS 2 package `syncai_mapping` (C++17, `rclcpp`), the SyncAI mapping back en
 `~/Projects/SyncAI-Robot-Workspace-dynamic-removal/src/syncai_mapping` (branch
 `feat/mapping-dynamic-removal`, commit `21d338f`), where the offline `hba_node` is already gone:
 only the pose graph and its post-save map cleaning live here. C++ rather than rclrs because GTSAM
-and PCL are far more mature there. Two executables:
+and PCL are far more mature there. Three executables:
 
 - `pgo_node`: pose graph over `syncai_pointlio`'s odometry and dense body clouds. Keyframes, loop
   closure (small_gicp + `PlanarLoopFactor`), GTSAM iSAM2, the `map -> <robot_id>/pointlio_odom`
@@ -18,6 +18,13 @@ and PCL are far more mature there. Two executables:
   are `map.pcd`, `octomap.bt` and `map_clean.recipe.json`; the 2D map is made from `map.pcd`
   downstream, so the tree must never fail the clean (out of memory drops it, `map.pcd` still
   goes).
+- `apply_octomap_edits` (`dynamic_removal/edits.*`): run by hand after the console's ground
+  editor saved `octomap_edits.json` (absolute OcTree keys of the voxels an operator marked as
+  floor, one per column). Sets each occupied and the `body_clearance` above it observed-free,
+  always starting from `octomap.raw.bt` (the clean's tree, copied there on the first apply, so
+  a rerun is idempotent and an erased patch really goes). A save and a new tree delete the
+  copy; the record stays, like `keepout.json`. The planner reads the tree at start, so a
+  patched map needs its session restarted.
 
 `README.md` is the authoritative behaviour reference (the run lifecycle, threading, loop
 verification, cleaning `map.pcd`, gotchas). Read the relevant section before changing behaviour.
