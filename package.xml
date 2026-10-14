@@ -13,8 +13,7 @@
     came over as a second node too and was removed in 2026-10, unused.
   </description>
   <maintainer email="chungweeeei@gmail.com">andy_tseng</maintainer>
-  <!-- MIT, not Apache-2.0 like the other syncai_* packages: pgos/ is
-       upstream-derived, and the LICENSE file is theirs. -->
+  <!-- MIT: pgos/ is upstream-derived and LICENSE is theirs. -->
   <license>MIT</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
@@ -28,36 +27,23 @@
   <depend>tf2_ros</depend>
   <depend>pcl_conversions</depend>
   <depend>message_filters</depend>
-  <!-- StartMapping, SaveMaps and ResetMapping (served here) and
-       ResetLIO (the client into syncai_pointlio). The workspace-wide
-       interface package, materialised by `vcs import < interface.repos`;
-       the services moved there from SyncAI-Fast-LIO2's `interface` with
-       these nodes, because the backend builds against syncai_common. -->
+  <!-- StartMapping / SaveMaps / ResetMapping (served) and ResetLIO (client);
+       from `vcs import < dependencies.repos`. -->
   <depend>syncai_common</depend>
-  <!-- pgo_node's loop verification backend (2026-10). Not a rosdep key:
-       src/third-party/small_gicp is a build_type cmake package colcon builds
-       first because of this line, exactly as syncai_localizer declares it. -->
+  <!-- Loop verification. Not a rosdep key: a src/third-party cmake package
+       this line orders first. -->
   <depend>small_gicp</depend>
   <!-- pgo_node locates the clean_map executable it spawns. -->
   <depend>ament_index_cpp</depend>
-  <!-- clean_map (2026-10), as a library only: voxel keys and ray traversal.
-       No OctoMap map is built or written; the clean's output is map.pcd.
-       Unlike GTSAM below, a real rosdep key: it resolves to
-       ros-humble-octomap, which the Dockerfile installs, so `rosdep check`
-       stays quiet. -->
+  <!-- clean_map: voxel keys, ray traversal and the optional octomap.bt.
+       A real rosdep key (ros-humble-octomap). -->
   <depend>octomap</depend>
-  <!-- The map_cloud_file notice and map_clean.recipe.json. Header-only; the
-       rosdep key resolves to nlohmann-json3-dev on Ubuntu 22.04. -->
+  <!-- The map_cloud_file notice and map_clean.recipe.json (nlohmann-json3-dev). -->
   <depend>nlohmann-json-dev</depend>
 
-  <!-- Not listed on purpose: PCL, Eigen and GTSAM. PCL / Eigen arrive
-       through pcl_conversions' own rosdep chain (libpcl-dev, libeigen3-dev).
-       GTSAM has no rosdep key matching what the robot image ships (it is
-       source-built into /usr/local by
-       the Dockerfile's deps-builder stage), and scripts/build.sh runs
-       `rosdep check`, so a key here would only add the "cannot locate" line
-       the fork's `<depend>GTSAM</depend>` used to produce. Same treatment
-       syncai_pointlio gives Sophus. -->
+  <!-- Not listed on purpose: PCL / Eigen come through pcl_conversions.
+       GTSAM is source-built into /usr/local and has no matching rosdep key,
+       so a <depend> would only make `rosdep check` fail. -->
 
   <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>ament_lint_auto</test_depend>

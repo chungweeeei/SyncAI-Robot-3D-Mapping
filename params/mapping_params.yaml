@@ -1,177 +1,103 @@
-# Pose-graph-optimisation parameters for pgo_node (syncai_mapping).
+# pgo_node parameters (syncai_mapping). README's parameter tables have the rationale.
 #
-# This is a normal ROS parameters file (loaded by mapping.launch.py via
-# `parameters=[this file, overrides]`), not a hand-parsed YAML: every key below
-# is a parameter pgo_node declares, so `ros2 param get/dump` and launch-level
-# overrides all work. The `/**/pgo_node:` wildcard key makes the file
-# namespace-independent — the launch runs the node at /<robot_id>/pgo. It was
-# SyncAI-Fast-LIO2's pgo/config/pgo.yaml until 2026-09, read by yaml-cpp
-# through a `config_path` parameter, which is why the launch used to rewrite
-# a copy of it under /tmp/syncai_pgo/ per robot_id; the values are unchanged.
+# Loaded by mapping.launch.py; `/**/pgo_node:` keeps the file namespace-independent
+# (the node runs at /<robot_id>/pgo). Inputs, frames and the LIO reset service are
+# derived from that namespace, not set here. The launch overrides map_cloud_dir
+# (appends /<robot_id>) and start_on_launch.
 #
-# The inputs, frames and LIO reset service are not here: pgo_node derives
-# them from its namespace (/<robot_id>/pgo -> /<robot_id>/pointlio/...,
-# <robot_id>/pointlio_odom, map). map_cloud_dir is the one robot_id-dependent
-# key: the launch overrides it with <map_cloud_dir>/<robot_id>, so the value
-# here is only the fallback for running the node bare.
+# Types matter: tuning values are doubles (always with a decimal point) except the
+# keys marked `# int`. A wrong type kills the node at startup with
+# InvalidParameterTypeException.
 #
-# Numeric types matter. The node declares every tuning value below as a double
-# EXCEPT the ints marked `# int` (loop_submap_half_range and friends) and the
-# bool / string switches: a bare `10` for a double key is an
-# int64 override that kills the node at startup with
-# InvalidParameterTypeException, and `5.0` for the int key is the mirror-image
-# failure. Doubles are written with a decimal point throughout.
-#
-# Read once at startup: the values are copied into the pose graph at
-# construction and on every reset_mapping, so `ros2 param set` afterwards
-# changes nothing.
+# Read once at startup (and copied again on reset_mapping): `ros2 param set` does nothing.
 /**/pgo_node:
   ros__parameters:
     # Keyframe selection: a new keyframe every 10 deg or 0.5 m of travel.
     keyframe_delta_deg: 10.0
     keyframe_delta_m: 0.5
-    # Loop closure: radius search over past keyframes, at least loop_time_tresh
-    # seconds apart, GICP-verified against a submap of +-loop_submap_half_range
-    # keyframes voxelised at loop_submap_resolution; a fitness score above
-    # loop_score_tresh is rejected. loop_search_period rate-limits the
-    # search.
+    # Loop closure: radius search over keyframes >= loop_time_tresh s apart,
+    # GICP against a +-loop_submap_half_range keyframe submap; rejected above
+    # loop_score_tresh (mean squared distance over the overlap).
     loop_search_radius: 1.0
     loop_time_tresh: 60.0
     loop_score_tresh: 0.15
-    # Loop verification is small_gicp GICP (2026-10, after the dp1f_1002
-    # replay -- README has the measurements; the fork's PCL ICP was dropped).
-    # Max GICP correspondence distance (m). The fork hard-coded 10, which let
-    # a 30 m corridor scan be steered by its far, non-overlapping points.
+    # Max GICP correspondence distance, m (the fork's 10 let far,
+    # non-overlapping points steer the alignment).
     loop_gicp_max_corr_dist: 1.0
     loop_gicp_num_threads: 4       # int
     loop_gicp_num_neighbors: 20    # int
-    # Loop edge = a 3-dim factor on the WORLD-frame x / y / yaw between the two
-    # keyframes (PlanarLoopFactor); z / roll / pitch are left to the odometry
-    # (Point-LIO is gravity-aligned; its z closed to 3 cm on that run, and the
-    # fork's 6-DOF edge turned that into a 15 cm double floor). false = the
-    # fork's 6-DOF BetweenFactor.
+    # true: loop edge on world-frame x / y / yaw only (PlanarLoopFactor), z /
+    # roll / pitch left to the odometry. false: the fork's 6-DOF BetweenFactor.
     loop_planar_correction: true
-    # Only used with loop_planar_correction false: BetweenFactor variance on
-    # roll / pitch / z. x / y / yaw always use the registration fitness.
+    # planar false only: BetweenFactor variance on roll / pitch / z
+    # (x / y / yaw use the registration fitness).
     loop_noise_var_roll_pitch_z: 0.01
-    # Only used with loop_planar_correction true: the planar loop factor's yaw
-    # sigma in DEGREES (x / y keep variance = fitness). Fitness-as-rad^2, the
-    # fork's convention, is an 18-22 deg sigma that ~500 odometry edges
-    # (~1 deg) simply outvote: on dp1f_1008_2 the loop closing the east
-    # corridor asked for 8 deg and was applied with none, leaving the two
-    # passes 1.1-1.6 m apart. <= 0 restores that behaviour.
+    # planar true only: loop yaw sigma, deg. <= 0 = variance = fitness, which
+    # the odometry edges outvote.
     loop_noise_yaw_sigma_deg: 1.5
-    # Same for the planar loop factor's x / y, in METRES. Fitness-as-m^2 is
-    # a 0.25-0.39 m sigma that the odometry outvotes: with yaw fixed,
-    # dp1f_1008_2's east corridor still closed only to 0.4-0.5 m; 0.1 m left
-    # 0.08-0.11 m, 0.05 m left 0.01-0.04 m. dp1f_1006 (already closed) stays
-    # within 8 cm at either. <= 0 restores variance = fitness.
+    # planar true only: loop x / y sigma, m. <= 0 = variance = fitness.
     loop_noise_xy_sigma_m: 0.05
-    # Per-keyframe tilt anchor, sigma in DEGREES: each keyframe's roll / pitch
-    # w.r.t. gravity held to Point-LIO's (gravity-aligned) value. Goes with
-    # the yaw sigma above: a loop that can really correct yaw otherwise gets
-    # it partly as pitch, and the chain climbs or sinks -- 0.8 m median,
-    # 2.2 m worst on dp1f_1008_2 without it. <= 0 = off.
+    # Per-keyframe roll / pitch prior to Point-LIO's gravity-aligned value, deg.
+    # Without it a yaw correction leaks into pitch and the chain climbs or sinks.
+    # <= 0 = off.
     keyframe_tilt_sigma_deg: 0.5
-    loop_submap_half_range: 5     # int, not 5.0 (see the header)
-    loop_submap_resolution: 0.1
-    loop_search_period: 5.0
-    # Robust kernel on every loop factor, as Cartographer puts a Huber loss on
-    # its loop constraints: huber / cauchy / none. The scale is in sigmas of
-    # the loop noise above; a correct loop settles at ~3 sigma, so 5 leaves it
-    # untouched and only bounds the pull of a wrong one.
+    loop_submap_half_range: 5     # int
+    loop_submap_resolution: 0.1   # m
+    loop_search_period: 5.0       # s between loop searches
+    # Robust kernel on loop factors: huber / cauchy / none. Scale in sigmas;
+    # a correct loop settles near 3, so 5 only bounds a wrong one.
     loop_robust_kernel: huber
     loop_robust_kernel_scale: 5.0
-    # Loop gates after GICP, over the OVERLAP only (source points with a
-    # submap point within loop_gicp_max_corr_dist): its share of the scan,
-    # the share of it within loop_inlier_dist (m), and loop_score_tresh above
-    # is now the mean squared distance over the overlap. Every candidate is
-    # logged as "[PGONode][loop] candidate ..." with these numbers; calibrate
-    # them on a replay.
+    # Post-GICP gates over the overlap (source points within
+    # loop_gicp_max_corr_dist): its share of the scan, and the share of it
+    # within loop_inlier_dist (m). Candidates are logged as
+    # "[PGONode][loop] candidate ..."; calibrate on a replay.
     loop_inlier_dist: 0.2
     loop_min_overlap_ratio: 0.3
     loop_min_inlier_ratio: 0.6
-    # Corridor degeneracy: min / max eigenvalue of GICP's x / y information.
-    # Logged as "xy info"; <= 0 = gate off until it has been calibrated.
+    # Corridor degeneracy gate (min / max eigenvalue of the x / y information,
+    # logged as "xy info"). <= 0 = off until calibrated.
     loop_min_xy_info_ratio: 0.0
-    # A loop may move the keyframe by at most this fraction of the path
-    # driven between its two keyframes (floored at loop_search_radius).
-    # Point-LIO drifts well under 1 %; a loop between two look-alike places
-    # asks for their separation. <= 0 = off.
+    # Max loop correction as a fraction of the path between its two keyframes
+    # (floored at loop_search_radius); rejects look-alike places. <= 0 = off.
     loop_max_drift_ratio: 0.05
-    # Radius candidates verified per search, the best inlier ratio wins.
-    loop_max_candidates: 3        # int
-    # Scan Context: a global candidate source for when the drift exceeds
-    # loop_search_radius, tried only when the radius search accepted nothing.
-    # Off until validated on replays of this site's maps: indoors, look-alike
-    # places are common and the drift gate is what keeps them out.
+    loop_max_candidates: 3        # int; radius candidates verified per search
+    # Scan Context: global candidates when the radius search accepts nothing.
+    # Off until validated on this site's replays (indoor look-alikes).
     loop_sc_enabled: false
     loop_sc_max_range: 20.0       # m, descriptor radius
     loop_sc_dist_tresh: 0.2       # descriptor distance; lower = stricter
 
-    # "Map so far" cloud published on pgo/map_cloud for the operator console
-    # while mapping. Merged from every keyframe's *current*
-    # (loop-closure-corrected) global pose on a background thread, so it never
-    # stalls the 50 ms timer that owns the map->local_frame TF broadcast.
-    # Publishing is subscriber-gated and keyframe-triggered; the period below
-    # is a floor on top of that.
+    # "Map so far" merge on pgo/map_cloud (rviz) and pgo/map_cloud_file (backend).
     map_cloud_resolution: 0.2   # voxel leaf (m) of the published merge
     map_cloud_pub_period: 3.0   # min seconds between publishes
-    # The merge is ALSO handed to the operator console's backend as a binary
-    # PCD in this directory, announced by a small JSON notice on
-    # pgo/map_cloud_file (the PointCloud2 on pgo/map_cloud stays for rviz). A
-    # large site's merge is 16-45 MB, which CycloneDDS over UDP on `lo` cannot
-    # deliver through the kernel's default 208 KB socket buffer -- the
-    # console's preview used to stop once the map grew. Must be a tmpfs the
-    # backend's container shares, i.e. the host's /dev/shm with `ipc: host` on
-    # both compose services (a private /dev/shm is 64 MB). mapping.launch.py
-    # appends /<robot_id>; this is the base.
+    # Base dir of the PCD hand-off to the backend (the launch appends /<robot_id>).
+    # Must be a tmpfs both containers share: the host's /dev/shm with `ipc: host`.
     map_cloud_dir: /dev/shm/syncai_pgo
-    # The node comes up IDLE (2026-10): no keyframe is banked and nothing is
-    # written to map_cloud_dir until pgo/start_mapping is called, and a
-    # successful pgo/save_maps returns it to IDLE. true skips the Start --
-    # the bag-replay knob (`start_on_launch:=true` on the launch), never what
-    # the mapping session wants.
+    # true: map from launch without pgo/start_mapping (bag replays only).
     start_on_launch: false
 
-    # Post-save map cleaning (2026-10). After a successful save_maps with
-    # save_patches, pgo_node spawns `clean_map <dir>` as a detached, nice'd
-    # process that counts, per hit voxel, the keyframes that hit it and those
-    # whose rays passed through it, and REPLACES map.pcd -- minutes after the
-    # save -- without the "dynamic" voxels (people: passed through
-    # >= dynamic_min_miss times and >= dynamic_miss_ratio x as often as hit,
-    # between floor + floor_band and floor + dynamic_max_height) and the
-    # "sparse" ones (hit by < sparse_min_hits keyframes, outside the floor
-    # band: smear, edge returns, reflections), and writes octomap.bt beside it
-    # (map_clean_octomap). Progress and outcome: map_clean.recipe.json. The
-    # README's "Cleaning map.pcd" has the details.
+    # Post-save map cleaning: after save_maps with save_patches, a detached
+    # `clean_map <dir>` replaces map.pcd without dynamic voxels (people) and
+    # sparse ones (one-off returns). See README "Cleaning map.pcd".
     map_clean_enabled: true
     map_clean_voxel_size: 0.1        # voxel edge, m
     map_clean_max_range: 20.0        # judging range, not the lidar's; farther points are kept, m
     map_clean_min_range: 0.5         # the robot's own body, m
     map_clean_lidar_height: 0.481    # keyframe z minus this is the floor, m
     map_clean_floor_band: 0.25       # +- m around the floor where neither rule applies
-    # The dynamic rule's narrower exemption: above this the rule applies
-    # inside the floor band too. People's feet and ankles sit 0.1-0.25 m up;
-    # on dp1f_1012 the operator's stayed in the map at every stop (seen once,
-    # passed through 30-40 times) and blocked the planner on the robot's own
-    # track. The floor is within a voxel of the local floor and keeps its
-    # exemption against grazing rays.
+    # Above this the dynamic rule applies inside the floor band too (feet), m.
     map_clean_floor_band_dynamic: 0.1
     map_clean_dynamic_max_height: 2.0  # people are looked for up to floor + this, m
     map_clean_floor_radius: 10.0     # keyframes within this give a cell its floor, m
     map_clean_sparse_min_hits: 2     # int; <= 1 turns the sparse rule off
     map_clean_dynamic_miss_ratio: 2.0
     map_clean_dynamic_min_miss: 3    # int; <= 0 turns the dynamic rule off
-    # Cut rays at the keyframe's floor - (floor_band - voxel_size): the 0.4 %
-    # of returns that land under a glossy floor (reflections) would otherwise
-    # count misses for voxels physically under it.
+    # Cut rays below the floor so reflections off a glossy floor count no misses.
     map_clean_clip_below_floor: true
-    # Also write octomap.bt (free + occupied, at map_clean_voxel_size) for
-    # octomap_planner's 3D global paths. Most of the clean's memory when on.
+    # Also write octomap.bt for octomap_planner's 3D paths. Most of the memory when on.
     map_clean_octomap: false
-    # Close enclosed gaps in the floor of octomap.bt (only) up to this far from
-    # the path on the same level, where the lidar sampled it too thinly (shelf
-    # and wall shadows); <= 0 turns it off, m.
+    # Close enclosed floor gaps in octomap.bt (only) within this of the path, m.
+    # <= 0 = off.
     map_clean_floor_fill_radius: 3.0
-    map_clean_nice: 10               # int, not 10.0
+    map_clean_nice: 10               # int

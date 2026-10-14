@@ -7,24 +7,15 @@
 #include <functional>
 
 /**
- * A loop-closure factor that constrains only what a loop is trusted for:
- * the WORLD-frame x / y offset and the yaw difference between the target
- * (old) and source (new) keyframes. z, roll and pitch are not in the error
- * at all, so the loop cannot ask for them and the optimiser has no reason
- * to bend the chain in pitch to satisfy it.
+ * Loop-closure factor on what a loop is trusted for only: the world-frame x / y offset and the
+ * yaw difference between target (old) and source (new) keyframes. z / roll / pitch are not in the
+ * error, so the loop cannot bend the chain in pitch.
  *
- * Why not a BetweenFactor<Pose3> with a tight roll / pitch / z noise: that
- * factor's error lives in the measured relative pose's frame, i.e. the
- * lidar body frame, which on this robot is pitched ~15 deg. Its x axis
- * therefore carries sin(15 deg) ~ 0.26 of world z, and every centimetre of
- * x correction the loop asked for leaked a quarter of it into z. The 2026-10
- * dp1f_1002 replay measured that leak as a flat -2..-4 cm offset after the
- * first loop and -9 cm at the last one (see the package README).
+ * Not a BetweenFactor<Pose3> with tight roll / pitch / z noise: its error lives in the body frame,
+ * pitched ~15 deg here, so x corrections leak ~sin(15 deg) = 0.26 of themselves into world z.
  *
- * Error (3-dim): [ (t_s - t_t).xy - m.xy ;  wrap(yaw(s) - yaw(t) - m.yaw) ],
- * with yaw = atan2(R10, R00) of each pose's rotation. Jacobians are
- * numerical (gtsam::numericalDerivative): a handful of loops per run, so
- * the cost is irrelevant and there is no analytic expression to get wrong.
+ * Error (3-dim): [ (t_s - t_t).xy - m.xy ; wrap(yaw(s) - yaw(t) - m.yaw) ], yaw = atan2(R10, R00).
+ * Numerical Jacobians: few loops per run, and no analytic expression to get wrong.
  */
 class PlanarLoopFactor : public gtsam::NoiseModelFactor2<gtsam::Pose3, gtsam::Pose3>
 {

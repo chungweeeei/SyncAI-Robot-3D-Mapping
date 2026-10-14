@@ -59,9 +59,8 @@ void readPoses(
   if (poses.empty()) throw InputError("poses.txt lists no keyframe");
 }
 
-// What identifies "the save this clean started from". A second save_maps into
-// the same directory rewrites poses.txt; size and mtime are compared too
-// because a truncating rewrite may keep the inode.
+// "The save this clean started from": a new save rewrites poses.txt. Size and
+// mtime too, because a truncating rewrite may keep the inode.
 struct Fingerprint
 {
   dev_t dev = 0;
@@ -87,8 +86,7 @@ Fingerprint fingerprint(const fs::path & poses_path)
   return f;
 }
 
-// One keyframe's patch: the raw body-frame cloud as pgo saved it, plus its
-// pose. false when the patch cannot be read.
+// The raw body-frame patch and its pose; false when unreadable.
 bool loadPatch(
   const fs::path & dir, const PoseLine & p, pcl::PointCloud<pcl::PointXYZI> & cloud,
   Eigen::Quaterniond & q, Eigen::Vector3d & t)
@@ -104,11 +102,10 @@ bool loadPatch(
   return true;
 }
 
-// One keyframe's returns, as the counting passes see them: world points at or
-// beyond min_range, split into the ones judged as usual and the ones below the
-// keyframe's floor (Params::clip_below_floor), whose ray stops at the clip
-// height. Both passes must see exactly the same scan, or a voxel's hit and
-// miss counts would come from different scans.
+// One keyframe's world returns beyond min_range, split into normal ones and
+// those below the floor (clip_below_floor), whose ray stops at the clip
+// height. Both counting passes build it the same way, or a voxel's hits and
+// misses would come from different scans.
 struct Scan
 {
   octomap::Pointcloud endpoints;
@@ -123,7 +120,7 @@ Scan worldScan(
   Scan s;
   s.endpoints.reserve(cloud.size());
   // One voxel inside the floor band, not at its edge: grazing rays carve all
-  // the way down to wherever the clip is (measured on the OctoMap prototype).
+  // the way down to the clip.
   const double clip_z =
     t.z() - params.lidar_height - std::max(0.0, params.floor_band - params.voxel_size);
   for (const auto & pt : cloud) {
@@ -143,12 +140,10 @@ Scan worldScan(
   return s;
 }
 
-// The voxels one scan passes through without ending in them (free_cells) and
-// the ones it ends in (occupied_cells): OctoMap's own discretized update (one
-// ray per endpoint voxel, truncated at max_range, and an endpoint beyond it
-// not occupied -- pass 1's hit keys exactly), plus the clipped rays up to
-// their clip point. A voxel the scan also ends in is not a miss, as in
-// OctoMap's update, where occupied wins within a scan.
+// The voxels one scan crosses (free_cells) and ends in (occupied_cells):
+// OctoMap's discretized update truncated at max_range (so occupied matches
+// pass 1's hit keys exactly), plus the clipped rays up to their clip point.
+// Occupied wins within a scan, as in OctoMap.
 void castScan(
   octomap::OcTree & tree, const Scan & s, const octomap::point3d & origin, double max_range,
   octomap::KeySet & free_cells, octomap::KeySet & occupied_cells)
@@ -165,10 +160,8 @@ void castScan(
   for (const auto & k : occupied_cells) free_cells.erase(k);
 }
 
-// Per hit voxel: how many scans ended in it, ended in it below their floor,
-// and passed through it, and what the classification made of it. Keyed on HIT
-// voxels only: keying every voxel a ray crosses would hold every free voxel
-// of the site (tens of millions at 0.1 m, GBs); hit voxels are a few million.
+// Per-scan counts and the verdict, keyed on HIT voxels only: keying every
+// crossed voxel would hold the site's free space (GBs).
 struct Counts
 {
   uint32_t hits = 0;
@@ -186,8 +179,7 @@ fs::path tmpPath(const fs::path & dir, const char * name)
 
 void savePcd(const fs::path & tmp, const pcl::PointCloud<pcl::PointXYZI> & cloud)
 {
-  // pcl's IOException puts the absolute path in what(), and this text lands
-  // in the sidecar. Re-say it with the bare name.
+  // pcl's what() holds the absolute path, and this text lands in the sidecar.
   try {
     if (pcl::io::savePCDFileBinary(tmp.string(), cloud) != 0) {
       throw std::runtime_error(std::string("cannot write ") + kMapFile);
@@ -197,30 +189,24 @@ void savePcd(const fs::path & tmp, const pcl::PointCloud<pcl::PointXYZI> & cloud
   }
 }
 
-// Floor inferred where the lidar sampled it too thinly (Params::floor_fill_radius):
-// the gaps in the hit floor closed, over 0.1 m columns, at the height of the
-// floor next to them. A column takes a floor voxel only if
+// Floor inferred where the lidar sampled it too thinly (floor_fill_radius):
+// gaps in the hit floor closed, per column, at the height of the floor next
+// to them. A column takes a floor voxel only if
 //  - it has none within a level of that height already,
-//  - that height is within floor_band of its local floor, and a keyframe on
-//    the same level is within floor_fill_radius,
-//  - it is enclosed: along some line through it (x, y or a diagonal), hit
-//    floor or an obstacle lies within kFillGap on BOTH sides. That is the
-//    shadow behind a shelf or along a wall, not open space on one side of
-//    the floor: grown outward instead, the fill ran through every door,
-//    window and glass front into fans of "floor" outside the building.
-//    kFillGap was 1.5 m until a pool on dp1f_1012 (1.6 m between its rims,
-//    water returns nothing, not even below the floor) was filled 0.85 m in
-//    from the walkway at a 3 m radius and all the way across at 6 m: a gap
-//    at most 2 * kFillGap wide is closed, so a pool or a pit only one rim
-//    away still counts as enclosed,
-//  - some voxel up to kFillClearance above it is observed free (a ray went
-//    over it: open floor in view, not behind a wall or under a shelf no ray
-//    reached) and none from two voxels up is occupied (a floor surface often
-//    spans two voxels); the column it grows from must be open the same way,
-//    so it never grows from a wall's foot, which is floor band too,
-//  - nothing kept was hit between floor_band and kFillDropDepth below it: a
-//    stair going down, a loading-dock edge, the lower level seen through a
-//    gap. A hole no ray looked into is not caught -- hence the radius.
+//  - that height is within floor_band of its local floor, with a keyframe on
+//    that level within floor_fill_radius,
+//  - it is enclosed: along x, y or a diagonal, hit floor or an obstacle lies
+//    within kFillGap on BOTH sides (a shadow behind a shelf or along a wall).
+//    Grown outward instead, the fill ran out through every door and glass
+//    front. kFillGap closes gaps up to 2 * kFillGap wide; larger, it filled a
+//    pool (water returns nothing) from one rim,
+//  - some voxel up to kFillClearance above is observed free (in view, not
+//    behind a wall or under a shelf) and none from two voxels up is occupied
+//    (a floor surface often spans two); its seed must be open the same way,
+//    so the fill never grows from a wall's foot,
+//  - nothing kept was hit from floor_band to kFillDropDepth below (a stair
+//    down, a dock edge). A hole no ray looked into is not caught: hence the
+//    radius.
 // It grows from hit floor only, so it never makes an island.
 constexpr double kFillClearance = 0.5;  // m
 constexpr double kFillDropDepth = 1.0;  // m
@@ -240,9 +226,9 @@ size_t fillFloor(
     return octomap::OcTreeKey(k[0] + dx, k[1] + dy, k[2] + dz);
   };
 
-  // Every floor voxel kept, and per column and level the one nearest the
-  // local floor as the seed: a wall's foot is in the floor band too, and
-  // growing from it would raise the floor by up to floor_band.
+  // Seeds: per column and level, the kept floor voxel nearest the local
+  // floor; growing from a wall's foot would raise the floor by up to
+  // floor_band.
   octomap::KeySet ground, filled_keys, tried;
   std::unordered_map<uint64_t, std::pair<octomap::OcTreeKey, double>> seeds;
   for (const auto & [key, c] : counts) {
@@ -311,8 +297,6 @@ size_t fillFloor(
     }
     return false;
   };
-  // Some voxel above observed free, and none occupied but the one right
-  // above: a floor surface often spans two voxels.
   auto openAbove = [&](const octomap::OcTreeKey & k) {
     bool seen_free = false;
     for (int dz = 1; dz <= clearance; ++dz) {
@@ -347,8 +331,7 @@ size_t fillFloor(
     const octomap::OcTreeKey from = queue[head];
     for (const auto & s : kStep) {
       const octomap::OcTreeKey k = shifted(from, s[0], s[1], 0);
-      // Every test below depends on the scans alone, not on the fill so far:
-      // a column is judged once.
+      // The tests depend on the scans alone, so a column is judged once.
       if (!tried.insert(k).second || inBand(ground, k) || inBand(filled_keys, k)) continue;
       const octomap::point3d v = tree.keyToCoord(k);
       const double fz = localFloor(v.x(), v.y(), v.z());
@@ -373,9 +356,8 @@ bool cleanImpl(
   std::vector<FloorRef> floors;
   readPoses(poses_path, params.lidar_height, poses, floors);
 
-  // The key arithmetic and ray traversal, and with params.octomap the tree
-  // written as octomap.bt, filled in pass 2. Not const: computeDiscreteUpdate
-  // reuses scratch members of the tree.
+  // Key arithmetic and ray traversal, and with params.octomap the tree itself.
+  // Not const: computeDiscreteUpdate uses scratch members.
   octomap::OcTree tree(params.voxel_size);
   const double band = params.floor_band, dyn_band = params.floor_band_dynamic,
                maxh = params.dynamic_max_height, rad = params.floor_radius;
@@ -383,10 +365,8 @@ bool cleanImpl(
 
   // ---- Pass 1: hits ----
   //
-  // The ray origin is the keyframe pose, i.e. the IMU origin; the lidar's is
-  // t + R * t_il, 5.1 cm away on this robot. Both rays end at the same world
-  // point, so they never diverge by more than those 5 cm: under one voxel,
-  // and inside the metres min_range writes off as the robot's body.
+  // The ray origin is the keyframe (IMU) pose, ~5 cm from the lidar's: under
+  // one voxel, so the extrinsic is not applied.
   for (const auto & p : poses) {
     pcl::PointCloud<pcl::PointXYZI> cloud;
     Eigen::Quaterniond q;
@@ -420,19 +400,14 @@ bool cleanImpl(
 
   // ---- Pass 2: misses, and the tree ----
   //
-  // The same scans again, after pass 1 rather than inside it, so a voxel
-  // first hit late still gets the misses of the scans that crossed it earlier.
+  // After pass 1, not inside it, so a voxel first hit late still gets the
+  // misses of earlier scans.
   //
-  // With params.octomap each scan also goes into the tree as
-  // insertPointCloud(..., discretize true) would put it -- one update per
-  // voxel per scan, free first, occupied winning -- reusing this pass's ray
-  // traversal, which is most of what a separate OctoMap build would cost.
-  // Lazy: inner nodes are brought up to date once, before the write. Not
-  // pruned along the way: on dp1f_1008_2_v2 a prune every 100 scans cut the
-  // peak from 2.0 to 1.5 GB but took the clean from 208 to 453 s, freshly
-  // collapsed nodes being expanded again by the next scans.
-  // Running out of memory here drops the tree, never the clean: map.pcd is
-  // what the 2D map is made from, the tree is an extra.
+  // With params.octomap each scan also goes into the tree as a discretized
+  // insertPointCloud would, reusing this pass's rays. Lazy (inner nodes
+  // updated once, before the write) and not pruned along the way, which
+  // roughly doubled the time for a modest peak saving. Out of memory drops
+  // the tree, never the clean: the 2D map is made from map.pcd.
   bool building = params.octomap;
   auto dropTree = [&](const std::string & why) {
     building = false;
@@ -469,25 +444,17 @@ bool cleanImpl(
 
   // ---- The local floor ----
   //
-  // A nearby keyframe's z minus lidar_height, looked up per 1 m cell within
-  // floor_radius. One global floor level does not work: dp1f_1006's floor
-  // changes height by about 1 m across the site. Which keyframe depends on
-  // the voxel's height too: only keyframes whose floor is at or below the
-  // voxel (within floor_band) qualify, of those the highest level (within
-  // kLevelTol of the highest), and of that level the nearest in xy. On one
-  // floor that is simply the nearest keyframe. Under a second floor the
-  // xy-nearest keyframe is often upstairs: on the prototype, 51 of the 54 1F
-  // cells it got wrong on dp1f_1008_2 lay under 2F and took 2F's floor, 5 m off.
+  // A nearby keyframe's floor, per 1 m cell within floor_radius; one global
+  // level fails on sites whose floor changes height. Only keyframes whose
+  // floor is at or below the voxel (within floor_band) qualify; of those the
+  // highest level (within kLevelTol), and of that level the nearest in xy.
+  // The xy-nearest alone is often upstairs when the voxel is under 2F.
   //
   // Up to dynamic_max_height above the nearest qualifying keyframe's floor, a
-  // level competes only if one of its keyframes is within kLevelReach of that
-  // keyframe's distance. "Highest" is meant for a storey
-  // overhead, whose path runs nearby; without the limit it also picked a stair
-  // landing 9 m away. On dp1f_1012 the landing at (-5.3, -15.3), 1.46 m above
-  // 1F, became the floor of the 1F corridor around (1, -8.5) although the
-  // robot drove through it: z 0.9-1.4 there fell in that floor band, exempt
-  // from the cleaning, and people's torsos stayed in map.pcd and occupied in
-  // octomap.bt along the whole corridor.
+  // level competes only with a keyframe within kLevelReach of that distance:
+  // "highest" is meant for a storey overhead, whose path runs nearby, not a
+  // stair landing metres away, which would put a corridor's people inside
+  // its floor band.
   constexpr double kLevelTol = 1.0;    // m; well under any storey height
   constexpr double kLevelReach = 3.0;  // m
   struct CellFloor
@@ -520,16 +487,15 @@ bool cleanImpl(
         fnear = c->f;
       }
     }
-    // Only where the voxel could be a person on the nearest keyframe's level.
-    // Higher up it cannot, and a storey's floor far from that storey's own
-    // path but over the lower one's needs the higher level to stay floor.
+    // Only where the voxel could be a person on the nearest keyframe's level;
+    // higher up, a storey's floor far from its own path must stay floor.
     double reach2 = std::numeric_limits<double>::max();
     if (z <= fnear + maxh) {
       const double reach = std::sqrt(dmin2) + kLevelReach;
       reach2 = reach * reach;
     }
-    // The highest level within reach, then its nearest keyframe. The nearest
-    // qualifying keyframe is itself within reach, so there always is one.
+    // The highest level within reach, then its nearest keyframe (the nearest
+    // qualifying keyframe is within reach, so there always is one).
     double top = NAN;
     for (auto c = hi; c != v.begin();) {
       --c;
@@ -571,27 +537,17 @@ bool cleanImpl(
 
   // ---- The tree: cleaned, written, freed ----
   //
-  // A removed voxel becomes what it would be had its hits never happened, so
-  // the tree agrees with the cleaned map.pcd and never claims more than was
-  // seen. Passed through by some scan: observed free, set to the clamping
-  // minimum -- where a person stood (dynamic voxels always have misses) is
-  // free space a planner may use. Never passed through: UNKNOWN, the node
-  // deleted. Most sparse voxels are that -- a reflection outside a window, a
-  // stray return behind a wall -- and setting them free would put islands of
-  // "observed free" where nothing was observed. A voxel only ever hit by
-  // clipped returns was never inserted and stays unknown likewise.
+  // A removed voxel becomes what it would be without its hits, so the tree
+  // never claims more than was seen: free if some ray passed through it
+  // (where a person stood), else UNKNOWN (node deleted) -- most sparse voxels
+  // are reflections and stray returns, and free would make islands where
+  // nothing was observed. Clipped-only voxels were never inserted.
   //
-  // A floor voxel a scan hit is set occupied whatever its misses, the floor
-  // band's exemption from the cleaning carried into the tree. The lidar sees
-  // the floor only at grazing angles, so every ray to a far floor point runs
-  // along the floor for metres before it ends and counts misses in the floor
-  // voxels other scans hit: on dp1f_1008_2_v2, 62 % of the floor voxels
-  // map.pcd has points in came out free, and under the path only 31 % of the
-  // 0.1 m columns had an occupied floor voxel (96 % with this). A planner
-  // looking for ground to drive on found holes everywhere.
+  // A hit floor voxel is set occupied whatever its misses: grazing rays to
+  // far floor points count misses along the floor for metres, and the
+  // planner would find holes everywhere.
   //
-  // Freed before pass 3 so the tree and the map cloud are never in memory
-  // together.
+  // Freed before pass 3 so the tree and the map cloud never coexist.
   if (building) {
     try {
       const float free_log = tree.getClampingThresMinLog();
@@ -614,8 +570,8 @@ bool cleanImpl(
         out.octomap_floor_filled = fillFloor(tree, counts, floors, params, localFloor);
       }
       tree.updateInnerOccupancy();
-      // The non-const writeBinary converts the tree to max-likelihood and
-      // prunes it in place; the counts below are of what was written.
+      // writeBinary converts to max-likelihood and prunes in place, so the
+      // counts below are of what was written.
       if (tree.writeBinary(tmpPath(dir, kOctomapFile).string())) {
         for (auto it = tree.begin_leafs(); it != tree.end_leafs(); ++it) {
           ++out.octomap_leaves;
@@ -632,13 +588,9 @@ bool cleanImpl(
 
   // ---- Pass 3: map.pcd without the removed voxels ----
   //
-  // The same concatenation pgo's saveMapsCB writes -- every patch, in
-  // poses.txt order, PointXYZI, pcl::transformPointCloud with the saved pose,
-  // no min_range cut and no voxel filter -- minus every point whose voxel was
-  // classified away. A point no scan counted (beyond max_range, inside
-  // min_range) is kept unless another scan's hit classified its voxel. The
-  // pose is poses.txt's, which pgo prints with 6 significant digits:
-  // sub-millimetre at site scale.
+  // The same concatenation pgo's saveMapsCB writes (every patch, poses.txt
+  // order, no min_range cut or voxel filter) minus the removed voxels' points.
+  // poses.txt's 6 significant digits are sub-millimetre at site scale.
   pcl::PointCloud<pcl::PointXYZI> map;
   done = 0;
   for (const auto & p : poses) {
@@ -649,8 +601,7 @@ bool cleanImpl(
       pcl::transformPointCloud(cloud, world, t, q);
       map.reserve(map.size() + world.size());
       for (size_t i = 0; i < cloud.size(); ++i) {
-        // The key from the same double arithmetic pass 1 used, so a point
-        // lands in the voxel it was counted in.
+        // Pass 1's double arithmetic, so a point lands in its counted voxel.
         const auto & b = cloud[i];
         const Eigen::Vector3d w = q * Eigen::Vector3d(b.x, b.y, b.z) + t;
         octomap::OcTreeKey key;
@@ -670,8 +621,7 @@ bool cleanImpl(
   if (map.empty()) throw std::runtime_error("cleaned map.pcd would be empty");
   savePcd(tmpPath(dir, kMapFile), map);
 
-  // A save into this directory while the clean ran replaced poses.txt and
-  // patches/; renaming now would put outputs built from the OLD save over it.
+  // A newer save replaced poses.txt: don't rename the OLD save's outputs over it.
   if (!(fingerprint(poses_path) == started_from)) {
     throw std::runtime_error("superseded: poses.txt changed during the clean (a newer save)");
   }
