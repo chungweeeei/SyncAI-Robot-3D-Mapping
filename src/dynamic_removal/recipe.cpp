@@ -15,11 +15,7 @@ namespace syncai_mapping::dynamic_removal::recipe
 namespace
 {
 
-// ordered_json: fields come out in insertion order, the order documented in
-// the header (status, started_at, finished_at, params, then measurements or
-// error). nlohmann formats numbers locale-independently and as the shortest
-// text that round-trips, and writes NaN / inf as null rather than invalid
-// JSON.
+// ordered_json: fields come out in the order the header documents.
 using Json = nlohmann::ordered_json;
 
 Json head(const char * status, const std::string & started_at)
@@ -50,9 +46,8 @@ Json paramsJson(const Params & p)
   return j;
 }
 
-// Compact, one line. `replace` instead of the default `strict`: an error text
-// from the OS or a library is not guaranteed to be valid UTF-8, and a status
-// write must not throw over it.
+// One line. `replace`, not `strict`: OS / library error text may not be valid
+// UTF-8, and a status write must not throw over it.
 std::string dump(const Json & j)
 {
   return j.dump(-1, ' ', false, Json::error_handler_t::replace);
@@ -123,9 +118,8 @@ std::string failed(
 void writeAtomic(const std::filesystem::path & dir, const std::string & json)
 {
   const std::filesystem::path final_path = dir / kSidecarFile;
-  // Per-process temp name: pgo_node and the clean it spawned both write this
-  // file, and two writers sharing one .tmp would rename each other's file
-  // away (the loser then fails with ENOENT).
+  // Per-process .tmp: pgo_node and its clean both write this file, and a
+  // shared .tmp would be renamed away under the other writer (ENOENT).
   const std::filesystem::path tmp_path =
     dir / (std::string(kSidecarFile) + "." + std::to_string(getpid()) + ".tmp");
   {

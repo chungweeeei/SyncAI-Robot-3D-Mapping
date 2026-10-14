@@ -1,24 +1,17 @@
-// clean_map: the post-save map cleaning for one pgo save directory.
-//
-//   clean_map <map_dir> [--voxel-size 0.1] [--max-range 20] [--min-range 0.5]
-//       [--lidar-height 0.481] [--floor-band 0.25] [--floor-band-dynamic 0.1] [--dynamic-max-height 2.0]
-//       [--floor-radius 10] [--sparse-min-hits 2] [--dynamic-miss-ratio 2.0]
-//       [--dynamic-min-miss 3] [--clip-below-floor 1] [--octomap 0] [--floor-fill-radius 3]
-//       [--nice 0]
-//       [--lock <path>|none] [--started-at <ISO-8601>]
+// clean_map <map_dir> [options, see usage()]: the post-save map cleaning for
+// one pgo save directory.
 //
 // pgo_node spawns it after a successful save_maps with save_patches
-// (detached, nice 10); run by hand it re-cleans any saved map from its
-// patches: `ros2 run syncai_mapping clean_map map/<name>`. It REPLACES
-// map.pcd, writes octomap.bt beside it (with --octomap 1) and writes
-// map_clean.recipe.json itself, from "converting" to "ok" / "failed", so its
-// outcome survives the node that started it.
+// (detached, nice 10); by hand, `ros2 run syncai_mapping clean_map
+// map/<name>` re-cleans a saved map from its patches. It writes
+// map_clean.recipe.json itself, so its outcome survives the node that
+// started it.
 //
 // Exit codes: 0 ok, 1 usage, 2 no usable input (poses.txt / patches/),
 // 3 clean or write failed, 4 interrupted (SIGTERM / SIGINT).
 //
-// A plain executable, not a ROS node: a batch job needs no DDS participant,
-// and it then also runs on a workstation that has only PCL and OctoMap.
+// Not a ROS node: a batch job needs no DDS participant, and it then runs
+// anywhere with PCL and OctoMap.
 
 #include <fcntl.h>
 #include <sys/file.h>
@@ -76,24 +69,21 @@ bool parseDouble(const std::string & s, double & out)
   }
 }
 
-// Best effort. Failing either only costs the robot some politeness.
+// Best effort: failing either only costs politeness.
 void lowerPriority(int nice_value)
 {
   if (nice_value != 0 && setpriority(PRIO_PROCESS, 0, nice_value) != 0) {
     std::cerr << "[clean_map] setpriority(" << nice_value << "): " << std::strerror(errno) << "\n";
   }
-  // Make this process the OOM killer's first choice. The hit-voxel map of a
-  // large site is hundreds of MB, the octree GBs, and without this the kernel picks the
-  // largest RSS -- which, mid-run, can be pgo_node holding an unsaved map.
-  // Raising one's own score needs no privilege.
+  // Be the OOM killer's first choice: otherwise it picks the largest RSS,
+  // which can be pgo_node holding an unsaved map. Needs no privilege.
   std::ofstream("/proc/self/oom_score_adj") << 500;
 }
 
-// Serialise cleans on this host: two saves in a row spawn two cleans, and two
-// at once would double the peak memory. /dev/shm because both robot
-// containers and the backend share it (`ipc: host`), so this is one lock per
-// host -- also the right memory domain. Returns the held fd, or -1 when
-// running unlocked (an uncreatable lock is a warning, not a failure).
+// Serialise cleans per host: two at once would double the peak memory.
+// /dev/shm is shared by every container (`ipc: host`), so this is one lock
+// per host. Returns the held fd, -1 when running unlocked (an uncreatable
+// lock is a warning, not a failure), -2 when stopped while waiting.
 int takeLock(const std::string & lock_path)
 {
   if (lock_path == "none") return -1;
@@ -107,8 +97,7 @@ int takeLock(const std::string & lock_path)
   }
   if (flock(fd, LOCK_EX | LOCK_NB) == 0) return fd;
   std::cout << "[clean_map] another clean_map holds " << lock_path << "; waiting" << std::endl;
-  // No SA_RESTART on the stop handlers, so a SIGTERM while queued here comes
-  // back as EINTR instead of being swallowed.
+  // The stop handlers have no SA_RESTART, so a SIGTERM here is an EINTR.
   while (flock(fd, LOCK_EX) != 0) {
     if (errno != EINTR || g_stop_signal != 0) {
       close(fd);
@@ -204,10 +193,8 @@ int main(int argc, char ** argv)
     return 2;
   }
 
-  // pgo_node spawns this with every signal at its default and in its own
-  // session; the pane it inherited stdout/stderr from may be gone by the time
-  // it prints (a mode switch kills the session), and a write to a dead pty
-  // must be an EIO to ignore, not a SIGPIPE that ends the clean.
+  // The pane stdout/stderr came from may be gone (a mode switch kills the
+  // session): a write to a dead pty must be an ignorable EIO, not a SIGPIPE.
   std::signal(SIGPIPE, SIG_IGN);
   struct sigaction sa
   {
@@ -229,8 +216,8 @@ int main(int argc, char ** argv)
     std::cerr << "[clean_map] FAILED: " << error << std::endl;
   };
   try {
-    // Again, even when pgo_node already wrote it: a hand run has nobody else
-    // to, and the params here are the ones actually in force.
+    // Even when pgo_node already wrote it: a hand run has nobody else to, and
+    // these are the params in force.
     recipe::writeAtomic(dir, recipe::converting(params, started_at));
   } catch (const std::exception & e) {
     std::cerr << "[clean_map] " << e.what() << "; nothing to report into, giving up\n";
@@ -242,9 +229,8 @@ int main(int argc, char ** argv)
     writeFailed("interrupted while waiting for another clean");
     return 4;
   }
-  // Once more after the lock: the clean that held it may have been an earlier
-  // save of this same directory, stopped by pgo_node, and its "failed:
-  // interrupted" may have landed after the "converting" above.
+  // Again after the lock: the previous holder may have been a stopped clean of
+  // this directory whose "failed: interrupted" landed after ours.
   try {
     recipe::writeAtomic(dir, recipe::converting(params, started_at));
   } catch (const std::exception & e) {

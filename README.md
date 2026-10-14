@@ -122,7 +122,8 @@ many **passed through** it (M), and rewrites `map.pcd` without two classes of po
   judgement needs the final loop-closed poses. Until the clean finishes, `map.pcd` is the raw save.
 - **Input is `patches/` + `poses.txt`**, not `map.pcd`, because rays need each scan's origin. No
   patches, no clean. `patches/` stay raw, so a rerun is idempotent.
-- **The floor band is exempt** from both rules (the floor is sampled thinly). The floor height is
+- **The floor band is exempt** from the sparse rule (the floor is sampled thinly), and the dynamic
+  rule starts only `floor_band_dynamic` above the floor, so feet are judged. The floor height is
   taken per level from nearby keyframes, within `floor_radius`: the highest level at or below the
   voxel. Where the voxel could be a person on the nearest keyframe's level (up to
   `dynamic_max_height` above it), only levels with a keyframe within 3 m of the nearest one's

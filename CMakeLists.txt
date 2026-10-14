@@ -1,12 +1,8 @@
 cmake_minimum_required(VERSION 3.8)
 project(syncai_mapping)
 
-# GTSAM iSAM2 plus an ICP loop-closure check on every keyframe, and a full-map
-# transform+voxel merge on the worker: unoptimised this cannot keep up with a
-# 0.5 m keyframe cadence on the Jetson. The upstream CMakeLists forced
-# CMAKE_BUILD_TYPE to Release unconditionally, which also silently defeated an
-# explicit `--cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo`; the guard keeps
-# the default and lets a deliberate choice through (same as syncai_pointlio).
+# Unoptimised, iSAM2 + loop GICP + the map merge cannot keep up on the Jetson.
+# Default to Release, but let an explicit CMAKE_BUILD_TYPE through.
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
@@ -16,8 +12,7 @@ if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD_REQUIRED ON)
 endif()
 
-# -pthread / -fexceptions carried over from upstream: the map-cloud merge runs
-# on a raw std::thread, and the flags predate the CMake thread-target idiom.
+# Carried over from upstream; the map-cloud merge runs on a raw std::thread.
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fexceptions")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread -fexceptions")
 
@@ -36,36 +31,25 @@ find_package(visualization_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(message_filters REQUIRED)
-# pgo_node finds the clean_map executable it spawns after a save through the
-# package index, so the install tree it runs from decides which one.
+# pgo_node locates the clean_map executable it spawns through the package index.
 find_package(ament_index_cpp REQUIRED)
-# SaveMaps / ResetMapping (served here) and ResetLIO (the client that drives
-# syncai_pointlio's reset). All three are in syncai_common since the port:
-# the backend, the only caller of the first two, builds against that package.
+# StartMapping / SaveMaps / ResetMapping (served) and ResetLIO (client).
 find_package(syncai_common REQUIRED)
 
-# GTSAM is source-built into /usr/local by the Dockerfile's deps-builder stage
-# (4.2.0 with system Eigen and TBB on) and has no rosdep key matching that
-# build -- see package.xml. Sophus left with hba_node (2026-10): pgo_node never
-# included it. Eigen / PCL come in through
-# pcl_conversions as well; the explicit finds are for ${PCL_LIBRARIES} and
-# the include dirs GTSAM's headers need unqualified.
+# GTSAM: source-built into /usr/local by the Dockerfile, no rosdep key (see
+# package.xml). Eigen / PCL are found explicitly for ${PCL_LIBRARIES} and the
+# include dirs GTSAM's headers need.
 find_package(GTSAM REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(PCL REQUIRED)
-# pgo_node's loop verification (small_gicp's RegistrationPCL, since 2026-10).
-# Same arrangement as syncai_localizer: src/third-party/small_gicp is a
-# build_type cmake package, ordered before this one by <depend>small_gicp</depend>.
+# Loop verification (RegistrationPCL). A plain cmake package from
+# src/third-party, ordered first by <depend>small_gicp</depend>.
 find_package(small_gicp REQUIRED)
-# clean_map's ray traversal and voxel keys (2026-10). ros-humble-octomap from
-# apt -- the rosdep key `octomap`, in the Dockerfile's dev stage -- rather than
-# a src/third-party checkout: upstream's top level would also put octovis and
-# dynamicEDT3D into every colcon build. Its config sets OCTOMAP_INCLUDE_DIRS /
-# OCTOMAP_LIBRARIES. No tree is ever built (see dynamic_removal/remover.hpp).
+# clean_map: voxel keys, ray traversal and the optional octomap.bt. From apt
+# (ros-humble-octomap): a source checkout would also build octovis and
+# dynamicEDT3D.
 find_package(octomap REQUIRED)
-# The JSON this package writes: pgo_node's map_cloud_file notice and
-# map_clean.recipe.json (both pgo_node and clean_map write the latter).
-# Header-only, from apt (nlohmann-json3-dev, the rosdep key nlohmann-json-dev).
+# The map_cloud_file notice and map_clean.recipe.json. Header-only, from apt.
 find_package(nlohmann_json 3.2.0 REQUIRED)
 
 set(SYNCAI_MAPPING_DEPS
@@ -83,8 +67,7 @@ set(SYNCAI_MAPPING_DEPS
 
 # ---- The post-save map cleaning: sidecar, cleaner, CLI ------------------------
 # Split so pgo_node links neither OctoMap nor the ray-cast: it only writes the
-# "converting" sidecar and spawns clean_map, which does the rest in its own
-# process (see PGONode::startMapClean for why a process).
+# "converting" sidecar and spawns clean_map.
 add_library(dynamic_removal_recipe STATIC src/dynamic_removal/recipe.cpp)
 target_include_directories(dynamic_removal_recipe PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -104,8 +87,7 @@ add_executable(clean_map src/dynamic_removal/main.cpp)
 target_link_libraries(clean_map dynamic_removal dynamic_removal_recipe)
 
 # ---- pgo_node: the online pose graph (mapping session) ----------------------
-# The pose graph itself has no ROS dependency, so it is a library the unit
-# tests link as well.
+# The pose graph is ROS-free, so the unit tests link it too.
 add_library(pgos STATIC
   src/pgos/commons.cpp
   src/pgos/pose_graph_optimizer.cpp
@@ -116,9 +98,8 @@ target_include_directories(pgos PUBLIC
   $<INSTALL_INTERFACE:include>
   ${EIGEN3_INCLUDE_DIR}
   ${PCL_INCLUDE_DIRS})
-# small_gicp::small_gicp carries OpenMP::OpenMP_CXX as a PUBLIC usage
-# requirement; without -fopenmp its omp pragmas are silently ignored and the
-# kd-tree / covariance estimation run single-threaded.
+# small_gicp::small_gicp carries OpenMP; without it its pragmas are silently
+# ignored and it runs single-threaded.
 target_link_libraries(pgos PUBLIC
   ${PCL_LIBRARIES}
   gtsam
@@ -150,22 +131,18 @@ install(DIRECTORY include/
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
-  # pgos/ is ported upstream code with no per-file licence header
-  # (the package LICENSE covers them), so the copyright linter would fail on
-  # every one of those files; cpplint is off for the same files as it was
-  # upstream. The rest of ament_lint_common still runs.
+  # pgos/ is upstream code without per-file licence headers (LICENSE covers
+  # it); copyright and cpplint are off as upstream had them.
   set(ament_cmake_copyright_FOUND TRUE)
   set(ament_cmake_cpplint_FOUND TRUE)
-  # The code follows .clang-format (checked by CI's clang-format job), which uncrustify's ROS
-  # style contradicts on brace and continuation placement; running both can never pass.
+  # .clang-format (checked in CI) and uncrustify's ROS style contradict each other.
   set(ament_cmake_uncrustify_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
 
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_scan_context test/test_scan_context.cpp)
   target_link_libraries(test_scan_context pgos)
-  # A synthetic building driven around twice with drifting odometry: loop
-  # closure end to end (candidates, GICP, gates, robust graph). Slow-ish.
+  # Loop closure end to end on a synthetic building. Slow-ish.
   ament_add_gtest(test_loop_closure test/test_loop_closure.cpp TIMEOUT 300)
   target_link_libraries(test_loop_closure pgos)
 endif()

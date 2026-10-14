@@ -1,35 +1,13 @@
-# Pose-graph-optimisation launch: starts pgo_node (syncai_mapping) and nothing
-# else.
+# Starts pgo_node (syncai_mapping) and nothing else; the mapping session runs it
+# after pointlio.launch.py. Do not add a pointlio Node here: a drifted second
+# copy once left the LIO unconfigured. The only coupling is the namespace.
 #
-# This is THE definition of how pgo_node is configured. The mapping session
-# (config/sessions/start_mapping.yaml) runs it in the `lio` window right after
-# `ros2 launch syncai_pointlio pointlio.launch.py`, the front end it consumes.
-# Until 2026-09 it lived in SyncAI-Fast-LIO2 as pgo_launch.py, and until
-# earlier that month it also include()d pointlio's launch; that include existed
-# because a second, drifted copy of the pointlio Node had once passed a
-# `config_path` nobody read, so the LIO fell back to struct defaults and
-# subscribed to topics nothing published — no odom, no body_cloud, nothing for
-# pgo to optimise. Do not grow a pointlio Node definition here: the only
-# coupling with pointlio.launch.py is the namespace below. pgo_node derives
-# its inputs (/<robot_id>/pointlio/{body_cloud_dense,lio_odom}), its LIO reset
-# client (/<robot_id>/pointlio/reset) and its local frame
-# (<robot_id>/pointlio_odom) from running at /<robot_id>/pgo, so those names
-# are not parameters and this launch does not pass them.
+# Namespace /<robot_id>/pgo (robot_id from the system INI) is load-bearing:
+# pgo_node derives its inputs (/<robot_id>/pointlio/...), LIO reset client and
+# local frame (<robot_id>/pointlio_odom) from it, so they are not parameters.
 #
-# robot_id is read from the system config INI at launch time (the workspace-
-# wide convention) and is used as the namespace:
-#   /<robot_id>/pgo/...   (start_mapping, save_maps, reset_mapping, map_cloud,
-#                          map_cloud_file, mapping_status, loop_markers)
-# The namespace is load-bearing: a pgo_node run anywhere other than
-# /<robot_id>/pgo looks for pointlio in the wrong place.
-#
-# pgo_node's settings are plain ROS parameters (params/mapping_params.yaml,
-# keyed by the `/**/pgo_node:` wildcard so the file works at any namespace),
-# so this launch passes the installed file straight through and layers only
-# map_cloud_dir (robot_id-dependent) and start_on_launch on top. It used to
-# instead rewrite the whole YAML into /tmp/syncai_pgo/pgo_<robot_id>.yaml,
-# because the node parsed that YAML itself with yaml-cpp and knew nothing
-# about ROS parameters.
+# Parameters come from params/mapping_params.yaml; this launch layers only
+# map_cloud_dir (robot_id-dependent) and start_on_launch on top.
 
 import configparser
 import os
@@ -41,17 +19,13 @@ from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.substitutions import FindPackageShare
 
-# Absolute rather than the relative `config/system.ini` the nav packages'
-# launch files use: identical to pointlio.launch.py and lio_bridge.launch.py,
-# so the three LIO-side launches resolve the INI the same way whether or not
-# the cwd is the workspace root.
+# Absolute, like pointlio.launch.py and lio_bridge.launch.py, so it does not
+# depend on the cwd.
 DEFAULT_SYSTEM_INI = os.path.expanduser("~/robot_ws/config/system.ini")
 FALLBACK_ROBOT_ID = "default_robot"
 
-# Base of the per-robot tmpfs directory the merged map cloud is handed to the
-# backend through (see map_cloud_dir in params/mapping_params.yaml). The
-# launch appends /<robot_id>; this default has to agree with the YAML's
-# fallback and with the path the backend's container reads.
+# Base of the map-cloud hand-off dir (/<robot_id> is appended). Must match the
+# YAML's fallback and the path the backend reads.
 DEFAULT_MAP_CLOUD_DIR = "/dev/shm/syncai_pgo"
 
 logger = launch_logging.get_logger("mapping.launch")
@@ -89,21 +63,16 @@ def launch_setup(context, *args, **kwargs):
     pkg_mapping = FindPackageShare("syncai_mapping").find("syncai_mapping")
     params_file = os.path.join(pkg_mapping, "params", "mapping_params.yaml")
 
-    # Layered AFTER the params file so they win (later entries override
-    # earlier ones).
+    # After the params file, so they win.
     overrides = {
-        # Per-robot subdirectory of the shared tmpfs the merged map cloud is
-        # handed to the backend through. Two robots on one host must not
-        # prune each other's files.
+        # Per robot, so two robots on one host do not prune each other's files.
         "map_cloud_dir": f"{map_cloud_base}/{robot_id}",
-        # Not robot_id-dependent; passed through so a bag replay can skip the
-        # Start from the command line. The YAML's false is the session's value.
+        # Lets a bag replay skip pgo/start_mapping from the command line.
         "start_on_launch": start_on_launch,
     }
 
-    # `name=` is fine here, unlike the planner / controller launches: this
-    # process hosts exactly one node, so there is no second node to be
-    # remapped onto the same name and lose its parameters.
+    # `name=` is safe: this process hosts a single node (unlike the planner /
+    # controller, where it would rename their internal costmap too).
     return [
         launch_ros.actions.Node(
             package="syncai_mapping",

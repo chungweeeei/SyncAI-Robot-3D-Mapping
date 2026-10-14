@@ -6,31 +6,18 @@
 #include <functional>
 
 /**
- * A unary factor that pins one keyframe's TILT (roll / pitch with respect to
- * gravity) to what the LIO front end measured, and leaves its yaw and
- * position free.
+ * Unary factor pinning one keyframe's tilt (roll / pitch w.r.t. gravity) to the LIO estimate;
+ * yaw and position stay free.
  *
- * Why it exists: the odometry chain is a series of 6-DOF BetweenFactors
- * expressed in the body frame, which on this robot is pitched ~15 deg, and
- * PlanarLoopFactor constrains only world x / y / yaw. When a loop is
- * allowed to correct yaw with real weight (loop_noise_yaw_sigma_deg), the
- * optimiser is free to realise that yaw with ANY rotation that is cheap in
- * the body frame -- and the cheapest ones carry a little pitch. A chain
- * whose heading is pitched by a fraction of a degree climbs or sinks along
- * every metre it drives. On the 2026-10-09 replays (yaw sigma 1.5 deg, no
- * tilt anchor) single loops moved keyframe z by 5-17 cm, and on dp1f_1006,
- * which was already closed, a 7 cm double floor appeared at a revisit.
+ * The odometry BetweenFactors live in the body frame (pitched ~15 deg) and PlanarLoopFactor
+ * constrains only world x / y / yaw, so a loop's yaw correction can otherwise be realised with
+ * a rotation carrying a little pitch, and the chain then climbs or sinks as it drives. Point-LIO
+ * observes tilt from the IMU at every instant, so it is an absolute measurement; with every
+ * keyframe anchored, heading can only change by rotating about world z.
  *
- * Point-LIO's world frame is gravity-aligned and its tilt is observable from
- * the IMU at every instant, so each keyframe's tilt is an absolute
- * measurement, not something a loop should be able to trade away. With
- * every keyframe anchored, the only way left to change a heading is to
- * rotate about world z, which does not touch z.
- *
- * Error (3-dim, rank 2): R^T e_z - g, where g = R_lio^T e_z is world "up"
- * seen in the body frame at insertion. A 3-vector instead of two angles so
- * there is no Euler singularity; the component along g is second order and
- * carries no information. Jacobian numerical, as in PlanarLoopFactor.
+ * Error (3-dim, rank 2): R^T e_z - g, with g = R_lio^T e_z (world up in the body frame at
+ * insertion). A 3-vector avoids Euler singularities; its component along g is second order.
+ * Numerical Jacobian, as in PlanarLoopFactor.
  */
 class GravityPriorFactor : public gtsam::NoiseModelFactor1<gtsam::Pose3>
 {

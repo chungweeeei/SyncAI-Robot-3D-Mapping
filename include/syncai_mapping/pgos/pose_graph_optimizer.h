@@ -40,17 +40,13 @@ struct LoopPair
   M3D r_offset;
   V3D t_offset;
   double score;
-  // The raw GICP result that produced r_offset / t_offset: the rigid transform
-  // that moves the source keyframe's WORLD-frame cloud onto the target submap.
-  // Kept so pgo_node can log what the loop asked for -- in particular its z
-  // component. Before 2026-10 nothing recorded this, and a run whose loop
-  // closures lifted the map by 15 cm had to be diagnosed from rviz markers.
+  // World-frame correction behind r_offset / t_offset (the GICP result, projected to x / y / yaw
+  // with loop_planar_correction): moves the source keyframe onto the target submap. Kept for
+  // pgo_node's log (notably its z).
   M3D gicp_r;
   V3D gicp_t;
-  // (dx, dy, dyaw) of the corrected source relative to the target, in the
-  // WORLD frame: the measurement of PlanarLoopFactor when
-  // loop_planar_correction is on. r_offset / t_offset above are what the
-  // 6-DOF BetweenFactor uses when it is off.
+  // (dx, dy, dyaw) of the corrected source relative to the target, world frame: the
+  // PlanarLoopFactor measurement. r_offset / t_offset feed the 6-DOF BetweenFactor instead.
   V3D planar_meas;
 };
 
@@ -61,126 +57,78 @@ struct PoseGraphOptimizerConfig
   double loop_search_radius = 1.0;
   double loop_time_tresh = 60.0;
   double loop_score_tresh = 0.15;
-  // Loops are verified with small_gicp's RegistrationPCL (GICP). The fork's
-  // PCL point-to-point ICP was dropped: on the dp1f_1002 replay it returned
-  // 1.5-3.7 deg of rotation and a z 2-7x too large for every corridor loop
-  // although the raw poses already agreed to 5 cm; GICP on the same pairs
-  // returned the right amount (offline check, Open3D: +0.03 m vs +0.13 m).
+  // Loops are verified with small_gicp GICP; the fork's PCL point-to-point ICP returned
+  // rotation and z several times too large on corridor loops.
   //
-  // Max GICP correspondence distance (m). The fork hard-coded 10, which in
-  // practice disables the gate: a source scan that reaches 30 m down a
-  // corridor pairs its far points with whatever the submap has nearest, and
-  // those pairs steer the solution. 1.0 since 2026-10.
+  // Max GICP correspondence distance (m). The fork's 10 effectively disabled the gate: far points
+  // of a long corridor scan paired with whatever was nearest and steered the solution.
   double loop_gicp_max_corr_dist = 1.0;
   int loop_gicp_num_threads = 4;
   int loop_gicp_num_neighbors = 20;
-  // Constrain only the WORLD-frame x / y / yaw between target and source
-  // (PlanarLoopFactor, a 3-dim error) instead of a 6-DOF BetweenFactor. The
-  // registration result is projected to x / y / yaw about the world z axis
-  // first. Point-LIO's world frame is gravity-aligned and its z was
-  // self-consistent to 3 cm over the dp1f_1002 run, so a loop has nothing to
-  // add on z / roll / pitch -- but a 6-DOF edge with a slightly wrong tilt
-  // bends the whole chain: with per-edge rotation variance 1e-6 and 30-60 m
-  // of lever arm the chain is softer in z than the loop factor, and the map
-  // ended up with a 15 cm double floor. An intermediate version kept the
-  // BetweenFactor and merely tightened its roll / pitch / z noise; that
-  // still leaked x into z through the 15 deg lidar pitch (-2..-9 cm). Off =
-  // the fork's 6-DOF behaviour.
+  // Constrain only world x / y / yaw (PlanarLoopFactor) instead of a 6-DOF BetweenFactor; the
+  // registration is projected onto x / y / yaw about world z first. Point-LIO's world frame is
+  // gravity-aligned, so a loop has nothing to add on z / roll / pitch, while a 6-DOF edge with a
+  // slightly wrong tilt bends the chain into a double floor (and a body-frame edge leaks x into z
+  // through the 15 deg lidar pitch). Off = the fork's 6-DOF behaviour.
   bool loop_planar_correction = true;
-  // Only with loop_planar_correction = false: BetweenFactor variance on
-  // roll / pitch / z (rad^2 / m^2); x / y / yaw keep the fork's "variance =
-  // registration fitness", which the planar factor uses for all three of
-  // its axes as well.
+  // Only with loop_planar_correction = false: BetweenFactor variance on roll / pitch / z
+  // (rad^2 / m^2); x / y / yaw keep the fork's "variance = registration fitness".
   double loop_noise_var_roll_pitch_z = 1e-2;
-  // Only with loop_planar_correction = true: the planar factor's yaw sigma
-  // (degrees). Its x / y keep "variance = fitness". The fork's convention
-  // put the fitness on yaw as well, read as rad^2: a typical 0.1-0.15 is a
-  // yaw sigma of 18-22 deg, while ~500 odometry edges (rotation variance
-  // 1e-6 each) accumulate about 1 deg -- so the optimiser ignored the loop's
-  // yaw entirely. On dp1f_1008_2 the one loop that closed the east corridor
-  // asked for 8 deg and +1.7 m and moved the keyframe 0.8 m with no yaw,
-  // leaving the two passes 1.1-1.6 m / 5-6 deg apart. <= 0 = the old
-  // behaviour (yaw variance = fitness).
+  // Only with loop_planar_correction = true: yaw sigma (deg). The fork's "variance = fitness"
+  // read as rad^2 is a ~20 deg sigma, which the odometry chain (~1 deg accumulated) outvotes, so
+  // loops never corrected yaw. <= 0 = variance = fitness.
   double loop_noise_yaw_sigma_deg = 1.5;
-  // Only with loop_planar_correction = true: the planar factor's x / y sigma
-  // (metres). The fork's "variance = fitness" is a 0.25-0.39 m sigma for the
-  // 0.06-0.15 fitness range a corridor loop scores, which a few hundred
-  // odometry edges outvote: with yaw fixed, dp1f_1008_2's east corridor still
-  // closed only to 0.4-0.5 m (0.1 m: 0.08-0.11 m; 0.05 m: 0.01-0.04 m).
-  // <= 0 = variance = fitness.
+  // Only with loop_planar_correction = true: x / y sigma (m). "Variance = fitness" is a
+  // 0.25-0.39 m sigma at typical corridor fitness, which a few hundred odometry edges outvote,
+  // leaving loops half-closed. <= 0 = variance = fitness.
   double loop_noise_xy_sigma_m = 0.05;
-  // Per-keyframe tilt anchor (GravityPriorFactor): each keyframe's roll /
-  // pitch w.r.t. gravity held to the LIO's value with this sigma (degrees).
-  // Required once loops correct yaw with real weight -- without it the
-  // optimiser realises a yaw correction partly as pitch and the chain
-  // climbs or sinks (5-17 cm per loop on the 2026-10-09 replays). <= 0 = no
-  // anchor, the behaviour before 2026-10-09.
+  // Per-keyframe tilt anchor (GravityPriorFactor) sigma (deg), holding roll / pitch to the LIO.
+  // Needed once loops correct yaw with real weight, or yaw is partly realised as pitch and the
+  // chain climbs or sinks. <= 0 = no anchor.
   double keyframe_tilt_sigma_deg = 0.5;
   int loop_submap_half_range = 5;
   double loop_submap_resolution = 0.1;
   double loop_search_period = 10.0;
 
-  // Robust kernel on every loop factor (Cartographer wraps its loop
-  // constraints in a Huber loss): "huber", "cauchy" or "none". Without one a
-  // single wrong loop that passed verification pulls the whole chain with a
-  // force that grows with its error. The scale is in whitened units (sigmas
-  // of the loop noise above): residuals below it are plain least squares.
-  // Huber is convex, so a correct loop still converges to the same answer,
-  // only in more iterations (smoothAndUpdate iterates until it settles). The
-  // scale must sit above where a correct loop ends up: with ~500 odometry
-  // edges the chain's own yaw sigma is ~1.3 deg, so an 8 deg loop with a
-  // 1.5 deg sigma settles at ~3 sigma; 5 leaves that untouched.
+  // Robust kernel on every loop factor: "huber", "cauchy" or "none", so one wrong loop that
+  // passed verification cannot pull the chain with a force growing with its error. The scale is
+  // in whitened units (sigmas of the loop noise); below it, plain least squares. It must sit
+  // above where a correct loop settles (~3 sigma for a large yaw correction), so 5.
   std::string loop_robust_kernel = "huber";
   double loop_robust_kernel_scale = 5.0;
 
-  // Verification after GICP, on the aligned source against the target
-  // submap. A source point is in the OVERLAP when the submap has a point
-  // within loop_gicp_max_corr_dist, and an INLIER when that point is within
-  // loop_inlier_dist. The fork's fitness averaged over every source point,
-  // so the part of the scan the old submap never saw counted against a good
-  // loop as much as misalignment did. Now:
-  //  - overlap ratio (overlap / source) >= loop_min_overlap_ratio: enough of
-  //    the scan is shared to judge at all;
-  //  - inlier ratio (inliers / overlap) >= loop_min_inlier_ratio: the shared
-  //    part actually lines up (the normalised score Cartographer gates on);
+  // Verification after GICP, aligned source vs target submap. A source point is in the OVERLAP
+  // when the submap has a point within loop_gicp_max_corr_dist, and an INLIER within
+  // loop_inlier_dist. Gates, so the part of the scan the submap never saw does not count against
+  // a good loop:
+  //  - overlap ratio (overlap / source) >= loop_min_overlap_ratio;
+  //  - inlier ratio (inliers / overlap) >= loop_min_inlier_ratio;
   //  - fitness = mean squared distance over the overlap <= loop_score_tresh.
   double loop_inlier_dist = 0.2;
   double loop_min_overlap_ratio = 0.3;
   double loop_min_inlier_ratio = 0.6;
-  // Corridor degeneracy gate: smallest / largest eigenvalue of the GICP
-  // Hessian's world x / y translation block. A straight corridor constrains
-  // the across-corridor direction only, so a loop can slide along it with a
-  // perfect fitness. <= 0 = off (the ratio is still logged, to calibrate).
+  // Corridor degeneracy gate: smallest / largest eigenvalue of the GICP Hessian's world x / y
+  // translation block; a straight corridor lets a loop slide along it with perfect fitness.
+  // <= 0 = off (still logged, to calibrate).
   double loop_min_xy_info_ratio = 0.0;
-  // Drift plausibility gate: the xy correction a loop asks for must not
-  // exceed this fraction of the path travelled between its two keyframes
-  // (floored at loop_search_radius). Odometry drift grows with distance and
-  // Point-LIO's stays well under 1 %, while a loop between two similar but
-  // different places (symmetric corridors, the far side of a hall) asks for
-  // a jump of the order of their separation. Matters most for Scan Context,
-  // whose candidates do not depend on the current estimate; on a synthetic,
-  // 180-deg-symmetric hall it matched the opposite side 16-33 m away, after
-  // 50-90 m of travel, with an inlier ratio of 0.7-0.8. <= 0 = off.
+  // Drift plausibility gate: the xy correction must not exceed this fraction of the path travelled
+  // between the two keyframes (floored at loop_search_radius). Point-LIO drifts well under 1 %,
+  // while a look-alike place (symmetric corridor, far side of a hall) asks for a jump of its
+  // separation. Matters most for Scan Context, whose candidates ignore the estimate. <= 0 = off.
   double loop_max_drift_ratio = 0.05;
-  // How many radius-search candidates are verified per search (nearest
-  // first, at least one submap apart in keyframe index); the one with the
-  // best inlier ratio wins. 1 = the fork's "first candidate only".
+  // Radius candidates verified per search (nearest first, at least one submap apart); the best
+  // inlier ratio wins. 1 = the fork's "first candidate only".
   int loop_max_candidates = 3;
 
-  // Scan Context, the global candidate source (see scan_context.h). Tried
-  // only when the radius search accepted nothing, so it matters after more
-  // drift than loop_search_radius. Its candidate is aligned coarse to fine
-  // like Cartographer's low- then high-resolution match: GICP on a submap
-  // voxelised at 3 x loop_submap_resolution with a 3 x larger
-  // correspondence distance first, then the normal verification.
+  // Scan Context, the global candidate source (see scan_context.h), tried only when the radius
+  // search accepted nothing. Aligned coarse to fine: GICP on a 3x coarser submap with a 3x
+  // correspondence distance, then the normal verification.
   bool loop_sc_enabled = false;
   double loop_sc_max_range = 20.0;  // m, descriptor radius
   double loop_sc_dist_tresh = 0.2;  // cosine distance, lower = stricter
 };
 
-// What happened to one loop candidate, for pgo_node's log. Filled by every
-// searchForLoopPairs(), accepted or not, so the thresholds can be calibrated
-// from a replay.
+// One loop candidate's outcome, for pgo_node's log (filled for every candidate, to calibrate).
 struct LoopCandidateReport
 {
   size_t target_id = 0;
@@ -208,9 +156,7 @@ public:
   bool addKeyPose(const CloudWithPose & cloud_with_pose);
 
   bool hasLoop() { return m_cache_pairs.size() > 0; }
-  // Loops accepted by the last searchForLoopPairs() and not yet folded into
-  // the graph. Valid only between that call and smoothAndUpdate(), which
-  // consumes them; pgo_node reads it in that window to log each closure.
+  // Loops accepted by the last searchForLoopPairs(); valid until smoothAndUpdate() consumes them.
   const std::vector<LoopPair> & pendingLoops() const { return m_cache_pairs; }
 
   void searchForLoopPairs();
@@ -220,8 +166,7 @@ public:
   CloudType::Ptr getSubMap(int idx, int half_range, double resolution);
   // Every candidate the last searchForLoopPairs() verified, accepted or not.
   const std::vector<LoopCandidateReport> & lastCandidates() const { return m_last_candidates; }
-  // Extra iSAM2 update() steps the last smoothAndUpdate() took to settle a
-  // loop (0 without one).
+  // Extra iSAM2 update() steps the last smoothAndUpdate() took to settle a loop (0 without one).
   int lastLoopIterations() const { return m_last_loop_iterations; }
   std::vector<std::pair<size_t, size_t>> & historyPairs() { return m_history_pairs; }
   std::vector<KeyPoseWithCloud> & keyPoses() { return m_key_poses; }
@@ -230,9 +175,8 @@ public:
   V3D offsetT() { return m_t_offset; }
 
 private:
-  // A keyframe to verify the current one against, and where to put the
-  // current keyframe's body cloud before GICP (its world pose for a radius
-  // candidate; a guess from the Scan Context yaw for a global one).
+  // A keyframe to verify the current one against, and the initial pose of the current body cloud
+  // for GICP (its world pose for a radius candidate; a Scan Context yaw guess for a global one).
   struct LoopCandidate
   {
     size_t target_id;
@@ -244,9 +188,8 @@ private:
 
   std::vector<LoopCandidate> radiusCandidates(size_t cur_idx);
   bool scanContextCandidate(size_t cur_idx, LoopCandidate & candidate);
-  // GICP plus the overlap / inlier / degeneracy gates. On success writes the
-  // world-frame correction that moves the current keyframe from its graph
-  // pose to where the registration puts it.
+  // GICP plus the overlap / inlier / degeneracy gates. On success, the world-frame correction
+  // from the current keyframe's graph pose to the registered one.
   bool verifyCandidate(
     size_t cur_idx, const LoopCandidate & candidate, LoopCandidateReport & report,
     M4D & correction);
