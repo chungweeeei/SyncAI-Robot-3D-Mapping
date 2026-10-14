@@ -115,7 +115,7 @@ many **passed through** it (M), and rewrites `map.pcd` without two classes of po
 
 | Class | Rule | Catches |
 |---|---|---|
-| dynamic | `M >= dynamic_min_miss` (3) and `M >= dynamic_miss_ratio × H` (2.0), between floor + `floor_band` and floor + `dynamic_max_height` | people |
+| dynamic | `M >= dynamic_min_miss` (3) and `M >= dynamic_miss_ratio × H` (2.0), between floor + `floor_band_dynamic` (0.1) and floor + `dynamic_max_height` | people, their feet included |
 | sparse | `H < sparse_min_hits` (2), outside the floor band | smear, edge returns, reflections |
 
 - **Offline on purpose.** A person shows up only once a later scan sees through them, and the
@@ -123,7 +123,11 @@ many **passed through** it (M), and rewrites `map.pcd` without two classes of po
 - **Input is `patches/` + `poses.txt`**, not `map.pcd`, because rays need each scan's origin. No
   patches, no clean. `patches/` stay raw, so a rerun is idempotent.
 - **The floor band is exempt** from both rules (the floor is sampled thinly). The floor height is
-  taken per level from nearby keyframes, within `floor_radius`.
+  taken per level from nearby keyframes, within `floor_radius`: the highest level at or below the
+  voxel. Where the voxel could be a person on the nearest keyframe's level (up to
+  `dynamic_max_height` above it), only levels with a keyframe within 3 m of the nearest one's
+  distance count, so a stair landing metres away does not become the floor of the corridor beside
+  it.
 - **Only points within `max_range` (20 m) are judged.** Farther points are kept, not removed. A
   larger value judges sparse, far returns and long, error-prone rays, which removes real
   structure; people near the path are judged from closer keyframes anyway.
@@ -140,6 +144,16 @@ many **passed through** it (M), and rewrites `map.pcd` without two classes of po
   columns were occupied on dp1f_1008_2_v2; 96 % with this). On dp1f_1008_2_v2 (2004 keyframes) it took the clean from
   142 s to 208 s and its peak memory from 1.0 to 2.0 GB, for a 2.8 MB file. A tree that runs out of
   memory is dropped and `map.pcd` is still cleaned.
+- **Floor fill** (`floor_fill_radius`, 3 m): even so, the floor 1-3 m from the path has gaps
+  (the shadows of shelves and walls, sampled too thinly), and a legged robot's planner needs ground
+  under every step. The tree (not `map.pcd`) gets those gaps closed at the height of the floor next
+  to them: a column within that radius of a keyframe on the same level, **enclosed** (hit floor or
+  an obstacle within 0.6 m on both sides along some line, so a pool or pit wider than 1.2 m stays a
+  hole), with space up to 0.5 m above seen free and empty and nothing hit up to 1 m below (a stair down, a drop). Enclosed, not grown outward:
+  grown outward it ran through doors, windows and glass fronts into fans of floor outside the
+  building. On dp1f_1008_2_v2 it adds 43 k voxels; of the columns with open space above, 89 % (1-2
+  m from the path) and 71 % (2-3 m) then have floor, from 72 % and 40 %. A hole no ray looked into
+  is not caught; hence the radius.
 - **Process model.** A detached child process (`posix_spawn`, own session, `nice`), so it survives
   a mode switch and the OOM killer picks it before `pgo_node`. One clean runs per host (a `flock` on
   `/dev/shm/syncai_pgo/clean_map.lock`). A new save into the same directory stops the old clean.
@@ -159,9 +173,10 @@ origins there is no free space.
 ros2 run syncai_mapping clean_map map/<name>
 ros2 run syncai_mapping clean_map map/<name> --lock none --dynamic-min-miss 0   # sparse rule only
 ros2 run syncai_mapping clean_map map/<name> --octomap 1                        # also octomap.bt
-#   --voxel-size 0.1 --max-range 20 --min-range 0.5 --lidar-height 0.481 --floor-band 0.25
+#   --voxel-size 0.1 --max-range 20 --min-range 0.5 --lidar-height 0.481 --floor-band 0.25 --floor-band-dynamic 0.1
 #   --dynamic-max-height 2.0 --floor-radius 10 --sparse-min-hits 2 --dynamic-miss-ratio 2.0
-#   --dynamic-min-miss 3 --clip-below-floor 1 --octomap 0 --nice 0 --started-at <ISO-8601>
+#   --dynamic-min-miss 3 --clip-below-floor 1 --octomap 0 --floor-fill-radius 3 --nice 0
+#   --started-at <ISO-8601>
 # exit 0 ok · 1 usage · 2 no poses.txt / readable patch · 3 failed · 4 interrupted
 cat map/<name>/map_clean.recipe.json
 ```
@@ -244,12 +259,14 @@ default silently.
 | `map_clean_max_range` / `map_clean_min_range` | `20.0` / `0.5` | m, judging range / robot-body cut-off. Points outside are not judged and stay in `map.pcd`. `max_range` is not the lidar's range; keep it below it |
 | `map_clean_lidar_height` | `0.481` | m, lidar above the floor |
 | `map_clean_floor_band` | `0.25` | m, band around the floor exempt from both rules |
+| `map_clean_floor_band_dynamic` | `0.1` | m, the dynamic rule's own exemption: above this the rule applies inside `floor_band` too. People's feet and ankles sit 0.1–0.25 m up and stayed in the map at every stop (dp1f_1012: the operator's, seen once from 3 m ahead, passed through 30–40 times); the floor itself lies within a voxel of the local floor |
 | `map_clean_floor_radius` | `10.0` | m, keyframes within this set a cell's floor |
 | `map_clean_dynamic_max_height` | `2.0` | m, top of the people window |
 | `map_clean_dynamic_miss_ratio` / `map_clean_dynamic_min_miss` | `2.0` / `3` | dynamic rule; `min_miss` is an **int**, `<= 0` = off |
 | `map_clean_sparse_min_hits` | `2` | **int**, sparse rule; `<= 1` = off |
 | `map_clean_clip_below_floor` | `true` | stop rays at the floor |
 | `map_clean_octomap` | `false` | also write `octomap.bt` |
+| `map_clean_floor_fill_radius` | `3.0` | m, infer floor in `octomap.bt` this far from the path; `<= 0` = off |
 | `map_clean_nice` | `10` | **int**, the clean's nice value |
 
 Every value is a double unless marked int or string (the `true` / `false` switches are bools). **Write doubles with a decimal point** (`10.0`): a bare

@@ -151,6 +151,13 @@
     map_clean_min_range: 0.5         # the robot's own body, m
     map_clean_lidar_height: 0.481    # keyframe z minus this is the floor, m
     map_clean_floor_band: 0.25       # +- m around the floor where neither rule applies
+    # The dynamic rule's narrower exemption: above this the rule applies
+    # inside the floor band too. People's feet and ankles sit 0.1-0.25 m up;
+    # on dp1f_1012 the operator's stayed in the map at every stop (seen once,
+    # passed through 30-40 times) and blocked the planner on the robot's own
+    # track. The floor is within a voxel of the local floor and keeps its
+    # exemption against grazing rays.
+    map_clean_floor_band_dynamic: 0.1
     map_clean_dynamic_max_height: 2.0  # people are looked for up to floor + this, m
     map_clean_floor_radius: 10.0     # keyframes within this give a cell its floor, m
     map_clean_sparse_min_hits: 2     # int; <= 1 turns the sparse rule off
@@ -163,4 +170,8 @@
     # Also write octomap.bt (free + occupied, at map_clean_voxel_size) for
     # octomap_planner's 3D global paths. Most of the clean's memory when on.
     map_clean_octomap: false
+    # Close enclosed gaps in the floor of octomap.bt (only) up to this far from
+    # the path on the same level, where the lidar sampled it too thinly (shelf
+    # and wall shadows); <= 0 turns it off, m.
+    map_clean_floor_fill_radius: 3.0
     map_clean_nice: 10               # int, not 10.0

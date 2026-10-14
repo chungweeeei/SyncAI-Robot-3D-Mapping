@@ -38,6 +38,7 @@ Json paramsJson(const Params & p)
   j["min_range"] = p.min_range;
   j["lidar_height"] = p.lidar_height;
   j["floor_band"] = p.floor_band;
+  j["floor_band_dynamic"] = p.floor_band_dynamic;
   j["dynamic_max_height"] = p.dynamic_max_height;
   j["floor_radius"] = p.floor_radius;
   j["sparse_min_hits"] = p.sparse_min_hits;
@@ -45,6 +46,7 @@ Json paramsJson(const Params & p)
   j["dynamic_min_miss"] = p.dynamic_min_miss;
   j["clip_below_floor"] = p.clip_below_floor;
   j["octomap"] = p.octomap;
+  j["floor_fill_radius"] = p.floor_fill_radius;
   return j;
 }
 
@@ -97,6 +99,7 @@ std::string ok(
   mj["octomap_free_leaves"] = m.octomap_free_leaves;
   mj["octomap_unknown_voxels"] = m.octomap_unknown_voxels;
   mj["octomap_floor_restored"] = m.octomap_floor_restored;
+  mj["octomap_floor_filled"] = m.octomap_floor_filled;
   if (!m.octomap_error.empty()) mj["octomap_error"] = m.octomap_error;
   mj["elapsed_s"] = m.elapsed_s;
   return dump(j);
