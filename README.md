@@ -100,6 +100,8 @@ notice:
 | `poses.txt` | (with `save_patches`) `<i>.pcd tx ty tz qw qx qy qz` per keyframe |
 | `map_clean.recipe.json` | (with `save_patches` and `map_clean_enabled`) the cleaning status |
 | `octomap.bt` | written later by `clean_map` (with `map_clean_octomap`); a save deletes the previous one first |
+| `octomap_edits.json` | not written: the ground patches the console's editor saved (see Ground patches); a save leaves it |
+| `octomap.raw.bt` | not written: `apply_octomap_edits`'s copy of the tree before patching; a save or a new tree deletes it |
 
 No file names the map or holds an absolute path, so a map directory can be renamed freely.
 
@@ -181,6 +183,35 @@ ros2 run syncai_mapping clean_map map/<name> --octomap 1                        
 # exit 0 ok · 1 usage · 2 no poses.txt / readable patch · 3 failed · 4 interrupted
 cat map/<name>/map_clean.recipe.json
 ```
+
+### Ground patches
+
+The floor fill closes only enclosed gaps, and a floor no ray looked into stays unknown, so the
+planner refuses it — a corridor the lidar only glanced at, the far side of a hall. An operator who
+knows it is floor paints it in the console's ground editor, which the backend records as
+`map/<name>/octomap_edits.json`: absolute OcTree keys (16 bits an axis, the map origin at 32768)
+of the voxels to make floor, one per xy column, with the resolution they were painted on. The
+standalone viewer's export has the same shape. `apply_octomap_edits` is what puts them in the tree:
+
+```bash
+ros2 run syncai_mapping apply_octomap_edits map/<name>            # [--clearance 0.6] [--edits octomap_edits.json]
+# exit 0 ok · 1 usage · 2 no octomap.bt / no record / unreadable record · 3 failed
+```
+
+- Each key becomes an occupied voxel, and the `clearance` (0.6 m, the planner's `body_clearance`)
+  above it is marked observed-free — the planner rejects a floor with unknown space over it
+  (`no_free_above` / `clearance_unknown`). A voxel already occupied in that band is left: a wall
+  foot or a shelf, which the planner then refuses on its own, rightly.
+- **It starts from `octomap.raw.bt` every time.** The first apply copies the clean's tree there;
+  later ones read it and rewrite `octomap.bt` (`.tmp` + rename), so the result is a function of
+  the record alone, a patch erased in the console really goes, and a rerun is idempotent. A new
+  save and a new tree from `clean_map` both delete the copy, since the old one would describe the
+  previous tree; `octomap_edits.json` stays, like `keepout.json` — the keys are that save's map
+  frame, so after a new mapping run into the same directory they are the operator's to redraw.
+- The record's `res` must be the tree's (exit 2 otherwise): keys index cells.
+- The planner loads the tree once at start, so a patched map needs the navigation session
+  restarted to take effect. Not yet: `clean_map` applying the record itself when it writes a new
+  tree, which would keep the patches through a re-clean.
 
 ### Run lifecycle
 

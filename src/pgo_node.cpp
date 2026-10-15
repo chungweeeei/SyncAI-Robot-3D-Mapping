@@ -27,6 +27,7 @@
 
 #include "ament_index_cpp/get_package_prefix.hpp"
 #include "nlohmann/json.hpp"
+#include "syncai_mapping/dynamic_removal/edits.hpp"
 #include "syncai_mapping/dynamic_removal/recipe.hpp"
 
 extern char ** environ;
@@ -1281,9 +1282,12 @@ void PGONode::removeMapCleanOutputs(const std::filesystem::path & map_dir)
   std::filesystem::remove(map_dir / dynamic_removal::recipe::kSidecarFile, ec);
   // A killed clean's half-written map.pcd (map.pcd itself is rewritten by the save).
   std::filesystem::remove(map_dir / (std::string(dynamic_removal::kMapFile) + ".tmp"), ec);
-  // An old octomap.bt would describe the previous run.
+  // An old octomap.bt would describe the previous run, and so would the copy
+  // apply_octomap_edits set aside before patching it. octomap_edits.json
+  // stays, like keepout.json: hand-marked, and the operator's to redraw.
   std::filesystem::remove(map_dir / dynamic_removal::kOctomapFile, ec);
   std::filesystem::remove(map_dir / (std::string(dynamic_removal::kOctomapFile) + ".tmp"), ec);
+  std::filesystem::remove(map_dir / dynamic_removal::edits::kRawOctomapFile, ec);
   // The sidecar's per-process `map_clean.recipe.json.<pid>.tmp`.
   const std::string prefix = std::string(dynamic_removal::recipe::kSidecarFile) + ".";
   for (const auto & entry : std::filesystem::directory_iterator(map_dir, ec)) {

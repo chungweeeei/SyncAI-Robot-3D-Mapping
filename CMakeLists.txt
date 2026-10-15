@@ -86,6 +86,20 @@ target_link_libraries(dynamic_removal PUBLIC ${OCTOMAP_LIBRARIES} ${PCL_LIBRARIE
 add_executable(clean_map src/dynamic_removal/main.cpp)
 target_link_libraries(clean_map dynamic_removal dynamic_removal_recipe)
 
+# ---- Ground patches: the console's octomap_edits.json applied to octomap.bt --
+# Its own library: OctoMap and JSON, no PCL, so the tool builds standalone.
+add_library(dynamic_removal_edits STATIC src/dynamic_removal/edits.cpp)
+target_include_directories(dynamic_removal_edits PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+  ${OCTOMAP_INCLUDE_DIRS})
+target_link_libraries(dynamic_removal_edits
+  PUBLIC ${OCTOMAP_LIBRARIES}
+  PRIVATE nlohmann_json::nlohmann_json)
+
+add_executable(apply_octomap_edits src/dynamic_removal/apply_edits_main.cpp)
+target_link_libraries(apply_octomap_edits dynamic_removal_edits)
+
 # ---- pgo_node: the online pose graph (mapping session) ----------------------
 # The pose graph is ROS-free, so the unit tests link it too.
 add_library(pgos STATIC
@@ -117,7 +131,7 @@ target_link_libraries(pgo_node
   nlohmann_json::nlohmann_json
 )
 
-install(TARGETS pgo_node clean_map
+install(TARGETS pgo_node clean_map apply_octomap_edits
   DESTINATION lib/${PROJECT_NAME}
 )
 
