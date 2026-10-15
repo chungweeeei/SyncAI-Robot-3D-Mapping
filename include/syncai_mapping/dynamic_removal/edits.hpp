@@ -4,7 +4,7 @@
 // Hand-patched ground for octomap.bt: the floor voxels an operator painted
 // into the console's ground editor (or the standalone viewer), recorded as
 // <dir>/octomap_edits.json and applied here. Run by apply_octomap_edits
-// (apply_edits_main.cpp); the README's "Ground patches" has the rules.
+// (src/apps/apply_octomap_edits.cpp); the README's "Ground patches" has the rules.
 //
 // The lidar sees the floor only at grazing angles, and the clean's floor fill
 // closes only enclosed gaps, so a floor no ray looked into stays unknown and

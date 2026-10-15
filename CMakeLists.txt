@@ -83,7 +83,7 @@ target_include_directories(dynamic_removal PUBLIC
   ${PCL_INCLUDE_DIRS})
 target_link_libraries(dynamic_removal PUBLIC ${OCTOMAP_LIBRARIES} ${PCL_LIBRARIES})
 
-add_executable(clean_map src/dynamic_removal/main.cpp)
+add_executable(clean_map src/apps/clean_map.cpp)
 target_link_libraries(clean_map dynamic_removal dynamic_removal_recipe)
 
 # ---- Ground patches: the console's octomap_edits.json applied to octomap.bt --
@@ -97,7 +97,7 @@ target_link_libraries(dynamic_removal_edits
   PUBLIC ${OCTOMAP_LIBRARIES}
   PRIVATE nlohmann_json::nlohmann_json)
 
-add_executable(apply_octomap_edits src/dynamic_removal/apply_edits_main.cpp)
+add_executable(apply_octomap_edits src/apps/apply_octomap_edits.cpp)
 target_link_libraries(apply_octomap_edits dynamic_removal_edits)
 
 # ---- pgo_node: the online pose graph (mapping session) ----------------------
@@ -121,8 +121,8 @@ target_link_libraries(pgos PUBLIC
 )
 
 add_executable(pgo_node
-  src/main.cpp
-  src/pgo_node.cpp
+  src/apps/pgo_node.cpp
+  src/pgo_node_impl.cpp
 )
 ament_target_dependencies(pgo_node ${SYNCAI_MAPPING_DEPS} ament_index_cpp)
 target_link_libraries(pgo_node
