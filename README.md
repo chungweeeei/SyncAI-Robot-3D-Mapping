@@ -32,8 +32,9 @@ It has two executables:
         │                                       clean_map ──► map.pcd (cleaned), [octomap.bt]
 ```
 
-Source layout: `src/pgos/` is the pose graph (upstream-derived, MIT), `src/pgo_node.cpp` is the
-ROS node, and `src/dynamic_removal/` is `clean_map`.
+Source layout: `src/pgos/` is the pose graph (upstream-derived, MIT), `src/pgo_node_impl.cpp` is
+the ROS node, `src/dynamic_removal/` is the map cleaning and the ground patches, and `src/apps/`
+holds one entry point per executable, named after it.
 
 Paths below such as `~/robot_ws`, `config/system.ini` and `map/<name>` refer to the robot's
 SyncAI-Robot-Workspace deployment.
@@ -213,6 +214,8 @@ ros2 run syncai_mapping apply_octomap_edits map/<name>            # [--clearance
   restarted to take effect. Not yet: `clean_map` applying the record itself when it writes a new
   tree, which would keep the patches through a re-clean.
 
+`test/test_octomap_edits.cpp` covers reading the record and these rules on small synthetic trees.
+
 ### Run lifecycle
 
 The node starts `IDLE` (or `MAPPING` with `start_on_launch`) and reports its state on
@@ -243,7 +246,7 @@ this, so the service responses say it. `reset_lio: false` resets only the graph,
 
 ### Threading
 
-`src/main.cpp` runs a 3-thread `MultiThreadedExecutor`:
+`src/apps/pgo_node.cpp` runs a 3-thread `MultiThreadedExecutor`:
 
 - the default group: the timer, both subscriptions, the status timer and `save_maps`, serialised;
 - a second group: `start_mapping` and `reset_mapping`, which block on the `ResetLIO` call;

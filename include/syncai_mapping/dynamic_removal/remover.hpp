@@ -3,7 +3,7 @@
 
 // The post-save map cleaning: ray-cast a pgo save directory (patches/ +
 // poses.txt) keyframe by keyframe and rewrite map.pcd without people and
-// one-off returns. Run by clean_map (main.cpp); the README's "Cleaning
+// one-off returns. Run by clean_map (src/apps/clean_map.cpp); the README's "Cleaning
 // map.pcd" has the rules and the process model.
 //
 // Offline on purpose: a voxel is a person only once a LATER scan sees through

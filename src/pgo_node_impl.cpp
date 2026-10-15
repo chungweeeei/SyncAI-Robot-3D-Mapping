@@ -1,5 +1,3 @@
-#include "syncai_mapping/pgo_node.hpp"
-
 #include <pcl/common/io.h>
 #include <pcl/exceptions.h>
 #include <pcl/io/pcd_io.h>
@@ -29,6 +27,7 @@
 #include "nlohmann/json.hpp"
 #include "syncai_mapping/dynamic_removal/edits.hpp"
 #include "syncai_mapping/dynamic_removal/recipe.hpp"
+#include "syncai_mapping/pgo_node.hpp"
 
 extern char ** environ;
 

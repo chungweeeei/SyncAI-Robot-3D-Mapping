@@ -26,6 +26,9 @@ and PCL are far more mature there. Three executables:
   copy; the record stays, like `keepout.json`. The planner reads the tree at start, so a
   patched map needs its session restarted.
 
+Each executable's `main` is a thin entry point in `src/apps/<executable>.cpp`; the logic lives in
+the libraries (`pgo_node_impl.cpp` + `pgos/`, `dynamic_removal/`), which the tests link.
+
 `README.md` is the authoritative behaviour reference (the run lifecycle, threading, loop
 verification, cleaning `map.pcd`, gotchas). Read the relevant section before changing behaviour.
 

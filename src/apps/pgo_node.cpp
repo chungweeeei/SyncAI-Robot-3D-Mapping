@@ -1,7 +1,8 @@
+#include "syncai_mapping/pgo_node.hpp"
+
 #include <memory>
 
 #include "rclcpp/rclcpp.hpp"
-#include "syncai_mapping/pgo_node.hpp"
 
 int main(int argc, char ** argv)
 {
