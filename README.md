@@ -213,6 +213,8 @@ ros2 run syncai_mapping apply_octomap_edits map/<name>            # [--clearance
   restarted to take effect. Not yet: `clean_map` applying the record itself when it writes a new
   tree, which would keep the patches through a re-clean.
 
+`test/test_octomap_edits.cpp` covers reading the record and these rules on small synthetic trees.
+
 ### Run lifecycle
 
 The node starts `IDLE` (or `MAPPING` with `start_on_launch`) and reports its state on

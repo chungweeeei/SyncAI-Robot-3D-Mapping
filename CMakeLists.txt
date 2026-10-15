@@ -159,6 +159,8 @@ if(BUILD_TESTING)
   # Loop closure end to end on a synthetic building. Slow-ish.
   ament_add_gtest(test_loop_closure test/test_loop_closure.cpp TIMEOUT 300)
   target_link_libraries(test_loop_closure pgos)
+  ament_add_gtest(test_octomap_edits test/test_octomap_edits.cpp)
+  target_link_libraries(test_octomap_edits dynamic_removal_edits)
 endif()
 
 ament_package()
