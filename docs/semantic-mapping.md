@@ -116,6 +116,43 @@ Images are JPEG; `cv2.imdecode` is enough offline.
 2. Promote the labeller to a ROS 2 node between Point-LIO and `pgo_node`; change the point type.
 3. Only then consider Grounded-SAM for object instances or CLIP2Scene for out-of-view semantics.
 
+## First offline result (2026-10-16, `dp1f_with_image`)
+
+Plan step 1, run end to end on `record/dp1f_with_image` (784 s, Mid360 + IMU, camera at 30 Hz,
+`camera_info` from the chessboard calibration, `tf_static` carrying the provisional hand-measured
+mount from `G23.urdf`). Scripts and the exact commands: `tools/semantic_offline/README.md`.
+Outputs: `map/dp1f_with_image/semantic/` (`map_semantic.{pcd,ply}`, the `_clean` variant masked
+by the cleaned `map.pcd`, `*_stats.json`, top-down views, `qa/` overlays).
+
+| Step | What was done | Result |
+|---|---|---|
+| Replay | pointlio + `pgo_node` (`start_on_launch`) in the robot image, `save_maps` with patches, `clean_map` | 1071 keyframes, 10 loops, 8.2 M points; clean `ok` in 51 s |
+| Keyframe stamps | `poses.txt` has none. Recorded `lio_odom` and pgo's `map → pointlio_odom` TF (one per processed pair) during the replay and re-ran `isKeyPose` over the processed pairs | 1071 = 1071, worst consecutive relative-motion mismatch 1 mm, all 637 `loop_markers` stamps found |
+| Extrinsic check | `overlay_test.py`: raw scans projected onto the nearest image at 4 moments | floor / wall boundary agrees to a few px at 2–3 m; the hand-measured mount is usable for stuff classes, not yet for thin objects |
+| 2D model | Mask2Former Swin-L ADE20K (`transformers`), 512 px short side | 0.33 s / image on the Mac's MPS (Swin-T: 0.21 s); floor / wall / ceiling / door / person clean on the test frames |
+| Projection | nearest image per keyframe (mean \|dt\| 7 ms, max 35 ms), body pose interpolated through `lio_odom` at the image stamp, 8 px z-buffer against occlusion, weight × 0.3 on label boundaries | 16 % of each patch's points lie in the frustum; 1071 keyframes in 326 s |
+| Fusion | 0.1 m voxels, weighted class histogram, argmax | 1.34 M voxels, 31 % labelled (40 % of the 0.90 M voxels left after masking with the cleaned `map.pcd`), mean vote purity 0.95 |
+
+Class shares of the labelled voxels: floor 36 %, wall 35 %, ceiling 18 %, then windowpane,
+door, column, shelf, armchair, chair, sofa, counter, light; `person` 0.3 % (1457 voxels, the
+ghosts `clean_map` removes from `map.pcd`; the masked variant inherits that removal, the raw
+fusion does not); `stairway` 801, `escalator` 990.
+
+What it says about the plan:
+
+- The recipe works as designed and nothing in `pgo_node` had to change. The one thing the save
+  lacks is the keyframe stamp: a `stamps.txt` beside `poses.txt` (or a column, if the backend's
+  reader is checked first) would replace the replay-time recording.
+- Grounded-SAM 2 was not run: closed-set stuff classes were the first target, and Mask2Former
+  covers them. The labeller takes any `Segmenter` with the same `(label, confidence, boundary)`
+  output, so an object-instance pass is a backend swap.
+- The extrinsic is the limit before the model is: calibrate (`direct_visual_lidar_calibration`)
+  before judging object classes, and keep the overlay check in the loop.
+- Only the forward frustum is labelled, so two thirds of the map stays unlabelled; a wider lens
+  or a second camera matters more than a better model for coverage.
+- Fusion is per patch at keyframe density (0.5 m / 10°); labelling every scan between keyframes
+  would multiply the votes per voxel, at 10× the segmentation cost.
+
 ## References
 
 - [gfchen01/semantic_mapping_with_360_camera_and_3d_lidar](https://github.com/gfchen01/semantic_mapping_with_360_camera_and_3d_lidar):
