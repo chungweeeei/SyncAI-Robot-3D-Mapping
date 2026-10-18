@@ -3,10 +3,12 @@ Every backend returns, per image, a list of (mask HxW bool, label str, score flo
 instance, with `label` one of the prompts.
 
 - `sam3`: Meta's SAM 3 through transformers (`Sam3Model`). One prompt per forward pass on shared
-  vision features, so the cost grows with the prompt list. The checkpoint `facebook/sam3` is
-  gated (manual approval): request access on its model page, then `hf auth login`. NOT TESTED
-  against the weights yet: written to the transformers 5.20 API, which this file was the first
-  to need; check one image with `seg_test`-style output before a full run.
+  vision features, so the cost grows with the prompt list: 10.9 s / image for the 18 prompts
+  below over the full dp1f_with_image run on an M-series Mac's MPS (2026-10-18), 5.4x Grounding
+  DINO + SAM, for far fewer false positives (no "vending machine" on a service counter, the
+  staircase as one `stairs` mask). Use it with instances.py --min-obs 3-4.
+  The checkpoint `facebook/sam3` is gated (manual approval): request access on its model page,
+  then `hf auth login`.
 - `grounded-sam`: Grounding DINO tiny (all prompts in one pass, boxes) + SAM ViT-B (a mask per
   box). Ungated, and the stand-in used to validate the association while SAM 3 was out of reach.
 """

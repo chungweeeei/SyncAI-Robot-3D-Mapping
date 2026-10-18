@@ -264,10 +264,26 @@ be measured in the floor plane; and a mask's ~20 LiDAR points include a few that
 gap onto something behind (robust footprint 1.4 m, full 2.4 m, p90 4.4 m), so each segment is cut
 to its largest 3D cluster first. After that the footprints are plausible (median 1.1 m).
 
-What limits it now is the detector, not the association: Grounding DINO's labels are the false
-positives above. SAM 3 is the planned replacement; its backend is written (`instance_seg.py`)
-but the `facebook/sam3` checkpoint is gated and was not available on 2026-10-18, so it has not
-been run.
+What limited it was the detector, not the association: Grounding DINO's labels are the false
+positives above. **SAM 3** (`--backend sam3`, run on 2026-10-18 once access was granted) fixes
+that, on the same 533 images, prompts and association (`semantic/instances_sam3/`):
+
+| | Grounding DINO + SAM | SAM 3 | SAM 3, `--min-obs 4` |
+|---|---|---|---|
+| s / image (MPS, 18 prompts) | 2.0 | 10.9 | (same segments) |
+| segments / objects kept | 985 / 188 | 1332 / 189 | 1332 / 101 |
+| "escalator" objects | 21, nearly all corridors / glass doors | 1 (the staircase from another side) | 0 |
+| teal lounge sofa + chair boxes (~18–21 pieces) | 20 | 33 | 21 |
+| small objects (extinguisher, trash can, plants, ATM) | some, mixed with false hits | all found, crops correct | most (one ATM-like machine, one plant lost) |
+
+With SAM 3 every crop in the gallery is the thing its label says, the ATM is labelled
+`vending machine` (the closest prompt), and the staircase is `stairs`. Objects are seen far more
+often (sofas typically 20–34 observations, against 2–10), which is what makes `--min-obs` a usable
+filter: the extra lounge boxes at the default 2 are thin 2–3-observation slivers of sofas already
+found. The queries ("綠色沙發", "grey leather armchair", "fire extinguisher", "trash can", "stairs")
+return the right objects. The cost is time: one forward pass per prompt, 5.4× Grounding DINO;
+offline that is ~95 minutes for this bag. **SAM 3 is the instance backend; `--min-obs 3–4` the
+setting for it**, and trimming the prompt list to what a site actually needs is the speed knob.
 
 ## References
 

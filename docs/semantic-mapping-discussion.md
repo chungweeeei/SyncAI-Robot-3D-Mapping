@@ -103,22 +103,16 @@ What the runs showed:
 
 ## 5. SAM 3 status
 
-The backend is written against the transformers 5.20 API (shared vision features, one forward
-per prompt) and checked against the installed source, but has never run: `facebook/sam3` and
-`facebook/sam3.1` are gated with manual approval, and the access request was still awaiting
-review on 2026-10-18 (Hugging Face login itself is fine). Unofficial re-uploads of the weights
-were not used. Once access is granted:
-
-```
-.venv/bin/python instances.py <map dir> <bag dir> <keyframes.txt> <lio_odom.txt> <out dir> --backend sam3
-```
-
-Check one image first; then compare against `instances_grounded-sam/` on false positives, the
-lounge count and the same queries.
+Access was granted on 2026-10-18 and the backend ran unchanged on the first try. On the same
+images, prompts and association it removes Grounding DINO's false positives (21 "escalator"
+objects down to one, the staircase), finds every small object with a correct crop, and with
+`--min-obs 4` gives 21 boxes in the teal lounge against ~18–21 pieces. It costs 10.9 s per image
+on MPS for 18 prompts, 5.4× Grounding DINO. Decision: SAM 3 is the instance backend, `--min-obs
+3–4`, and the prompt list is the speed knob. Numbers in `semantic-mapping.md`, "Object map".
 
 ## 6. Open items
 
-- SAM 3 run and comparison (blocked on access).
+- Prompt list per site, to bring SAM 3's time down; and Jetson feasibility (unmeasured).
 - A "not found" rule for object queries.
 - Keepout-mask generation from `map_semantic_clean.pcd` (section 2, item 1), checked on the
   glass façade and the escalator of this map.

@@ -54,17 +54,11 @@
 
 ## 5. SAM 3 現況
 
-後端已依 transformers 5.20 的 API 寫好（共用影像特徵、每個提示詞一次 forward），並對照已安裝的原始碼確認過，但從未實際跑過：`facebook/sam3` 和 `facebook/sam3.1` 都需要人工核准，2026-10-18 存取申請仍在等待審核（Hugging Face 登入本身沒問題）。沒有使用非官方轉存的權重。核准後：
-
-```
-.venv/bin/python instances.py <map dir> <bag dir> <keyframes.txt> <lio_odom.txt> <out dir> --backend sam3
-```
-
-先用一張影像確認；再和 `instances_grounded-sam/` 比較誤判、沙發區數量和同一組查詢。
+2026-10-18 取得存取權，後端第一次就照原樣跑通。在同樣的影像、提示詞和關聯參數下，它消除了 Grounding DINO 的誤判（21 個「escalator」物體降到 1 個，就是那座樓梯），每個小物體都找到且裁圖正確；搭配 `--min-obs 4`，青綠沙發區有 21 個框，實際約 18–21 件。代價是在 MPS 上 18 個提示詞每張 10.9 秒，是 Grounding DINO 的 5.4 倍。決定：實例後端採用 SAM 3，`--min-obs 3–4`，提示詞清單是調速度的旋鈕。數字見 `semantic-mapping.md` 的「Object map」。
 
 ## 6. 待辦
 
-- SAM 3 執行與比較（等待存取核准）。
+- 依場地調整提示詞清單以縮短 SAM 3 的時間；以及在 Jetson 上的可行性（尚未量測）。
 - 物體查詢的「找不到」規則。
 - 從 `map_semantic_clean.pcd` 產生 keepout mask（第 2 節第 1 項），並在這張地圖的玻璃帷幕和手扶梯上檢查。
 - 把某個物體的目標 pose 送給機器人或模擬環境的 `navigate_to_goal`，看停的位置是否合理；離線無法驗證。
