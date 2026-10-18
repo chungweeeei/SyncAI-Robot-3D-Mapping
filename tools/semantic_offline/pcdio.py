@@ -75,3 +75,23 @@ def write_labeled(
     with open(path, "wb") as f:
         f.write(header.encode("ascii"))
         f.write(arr.tobytes())
+
+
+def read_labeled(path: Path):
+    """Read back a PCD written by write_labeled: (xyz f32 Nx3, label uint8, confidence f32)."""
+    with open(path, "rb") as f:
+        fields = None
+        while True:
+            line = f.readline().decode("ascii", "replace")
+            key, _, rest = line.strip().partition(" ")
+            if key == "FIELDS":
+                fields = rest.split()
+            elif key == "POINTS":
+                n = int(rest)
+            elif key == "DATA":
+                break
+        dtype = np.dtype([(name, "<u4" if name == "label" else "<f4") for name in fields])
+        arr = np.frombuffer(f.read(n * dtype.itemsize), dtype=dtype, count=n)
+    xyz = np.stack([arr["x"], arr["y"], arr["z"]], axis=1)
+    conf = arr["confidence"] if "confidence" in fields else np.ones(n, np.float32)
+    return xyz, arr["label"].astype(np.uint8), conf

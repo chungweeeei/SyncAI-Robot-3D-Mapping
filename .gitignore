@@ -10,3 +10,7 @@ compile_commands.json
 .vscode/
 .cache/
 *.swp
+
+# Python (tools/semantic_offline)
+__pycache__/
+.venv/

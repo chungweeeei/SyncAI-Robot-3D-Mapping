@@ -14,9 +14,11 @@ from rosbags.rosbag2 import Reader
 from rosbags.typesys import Stores, get_types_from_msg, get_typestore
 from scipy.spatial.transform import Rotation as R
 
+# The Livox CustomMsg definitions: the Workspace checkout this package is imported into
+# (src/syncai_mapping/tools/semantic_offline -> src/third-party/livox_ros_driver2/msg), or LIVOX_MSG_DIR.
 LIVOX_MSG_DIR = Path(
     os.environ.get("LIVOX_MSG_DIR")
-    or "/Users/andy_tseng/Desktop/Projects/SyncAI-Robot-Workspace/src/third-party/livox_ros_driver2/msg"
+    or Path(__file__).resolve().parents[3] / "third-party" / "livox_ros_driver2" / "msg"
 )
 
 IMAGE_TOPIC = "/robot01/image_raw/compressed"

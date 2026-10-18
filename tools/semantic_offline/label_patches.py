@@ -18,7 +18,7 @@ from scipy.spatial.transform import Rotation as R, Slerp
 
 from bagio import ImageIndex, body_to_camera, project, read_static
 from pcdio import read_xyz
-from segment import UNLABELED, Segmenter
+from segment import UNLABELED, make_segmenter
 
 
 def load_keyframes(path: Path):
@@ -70,6 +70,10 @@ def main():
     ap.add_argument("--max-image-dt-ms", type=float, default=60.0)
     ap.add_argument("--viz-every", type=int, default=100)
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument(
+        "--stride", type=int, default=1, help="label every N-th keyframe (for the slow backends)"
+    )
+    ap.add_argument("--short-side", type=int, default=512, help="segmentation input short side, px")
     a = ap.parse_args()
     bag, map_dir, out = Path(a.bag), Path(a.map_dir), Path(a.out)
     (out / "labels").mkdir(parents=True, exist_ok=True)
@@ -82,7 +86,10 @@ def main():
     kfs = load_keyframes(Path(a.keyframes))
     if a.limit:
         kfs = kfs[: a.limit]
-    seg = Segmenter(a.model)
+    # keyframe indices stay the original ones under --stride, so QA images line up across runs
+    kf_index = list(range(len(kfs)))[:: a.stride]
+    kfs = kfs[:: a.stride]
+    seg = make_segmenter(a.model, short_side=a.short_side)
     json.dump(
         {"id2label": seg.id2label, "palette": seg.palette.tolist(), "model": a.model},
         open(out / "classes.json", "w"),
@@ -91,7 +98,7 @@ def main():
     # image index -> keyframes that use it
     by_image = defaultdict(list)
     skipped = 0
-    for k, (name, st, _, _) in enumerate(kfs):
+    for k, (name, st, _, _) in zip(kf_index, kfs):
         j, dt = idx.nearest(st)
         if dt > a.max_image_dt_ms * 1e6:
             skipped += 1
@@ -104,9 +111,12 @@ def main():
     W, H = cam.width, cam.height
     t0 = time.time()
     done = 0
+    seg_s = 0.0
     stats = []
     for j, img_stamp, img in idx.read_many(sorted(by_image)):
+        ts = time.time()
         lab, conf, bnd = seg(img)
+        seg_s += time.time() - ts
         for k, name, st, dt in by_image[j]:
             xyz = read_xyz(map_dir / "patches" / name)
             # patch (body @ keyframe stamp) -> body @ image stamp, through the odom frame
@@ -183,6 +193,24 @@ def main():
     with open(out / "label_stats.txt", "w") as f:
         for s in stats:
             f.write(f"{s[0]} {s[1]} {s[2]:.1f} {s[3]:.3f}\n")
+    json.dump(
+        {
+            "model": a.model,
+            "device": seg.device,
+            "short_side": a.short_side,
+            "stride": a.stride,
+            "keyframes": done,
+            "images": len(by_image),
+            "seconds_total": time.time() - t0,
+            "seconds_segmentation": seg_s,
+            "seconds_per_image": seg_s / max(len(by_image), 1),
+            "labelled_fraction_mean": float(fr.mean()),
+            "image_dt_ms_mean": float(dts.mean()),
+            "image_dt_ms_max": float(dts.max()),
+        },
+        open(out / "run.json", "w"),
+        indent=1,
+    )
 
 
 if __name__ == "__main__":

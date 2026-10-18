@@ -9,6 +9,15 @@ mkdir -p "$OUT" /tmp/ros_log "$MAP"
 source /opt/ros/humble/setup.bash
 source $WS/install/setup.bash
 cd $WS
+# Fail before the 13-minute play, not after it: the save call needs the interface package's
+# Python typesupport, and a workspace whose build/ was deleted leaves install/syncai_common as
+# dangling --symlink-install links ("The passed service type is invalid" from ros2 service call).
+# Rebuild it (into a scratch prefix is enough: colcon build --base-paths src/syncai_common
+# --build-base /scratch/ifc/build --install-base /scratch/ifc/install) and source that first.
+if ! python3 -c "from syncai_common.srv import SaveMaps" 2>/dev/null; then
+  echo "syncai_common Python typesupport is not importable; rebuild it before replaying" >&2
+  exit 2
+fi
 echo "start $(date)"
 ros2 launch syncai_pointlio pointlio.launch.py system_config:=$INI > $OUT/pointlio.log 2>&1 &
 sleep 4
