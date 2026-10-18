@@ -88,7 +88,9 @@ text-prompted instance masks on every `--stride`-th keyframe image, each mask's 
 points in the world frame. Phase 2 (seconds, `--reuse`): each segment is cut to its largest 3D
 cluster, then joins the object of its coarse group that has `--match` of its points within
 `--near` in the floor plane, or whose grown footprint holds its centroid, never past
-`--max-extent`; objects that end up near each other merge; `--min-obs` drops one-frame hits.
+`--max-extent`; objects that end up near each other merge. A `dedup` pass then gives each
+physical object one id (cross-class overlaps and same-class fragments merge, unless a frame saw
+them as separate masks), and `--min-obs` drops one-frame hits; use `--min-obs 4` with SAM 3.
 
 ```
 .venv/bin/python instances.py <map dir> <bag dir> <keyframes.txt> <lio_odom.txt> <out dir> [--backend sam3|grounded-sam]
@@ -98,6 +100,26 @@ cluster, then joins the object of its coarse group that has `--match` of its poi
 `--backend sam3` needs the gated `facebook/sam3` checkpoint: request access on its Hugging Face
 page, then `hf auth login`. The backend follows the transformers 5.20 API (shared vision
 features, one forward per prompt) but has not been run against the weights yet.
+
+## Semantic octomap viewer (`semantic_octomap_viewer.py`, `octomap_io.py`)
+
+One self-contained HTML page (three.js, ~10 MB) with the octomap's occupied cells coloured by
+class and the object map on top. Needs `octomap.bt` (`clean_map <map dir> --octomap 1`, which
+reproduces `map.pcd` exactly from `patches/`).
+
+```
+.venv/bin/python semantic_octomap_viewer.py <map dir> <semantic run dir> <objects dir> <out.html>
+```
+
+- `octomap_io.read_bt` reads the binary tree without the octomap library; an octomap cell of a
+  0.1 m tree is a fuse.py voxel key, so the semantic voxels index it directly.
+- Objects (`objects_voxels.npz` from `instances.py`) are painted onto the cells they cover:
+  seeds within 0.25 m of a mask's points, region-grown through occupied cells above the walked
+  floor, bounded by the class size and height. Box, centroid and tag come from the painted cells.
+- Tags are sprites in the scene (depth-tested, constant screen size) whose tip sits on one of
+  the object's own cells; an HTML overlay floated in front of everything.
+- Modes: fused (object class over voxel semantics), voxel semantics, object instances, height.
+  `#obj=<id>[&az=<deg>]` in the URL flies to an object.
 
 ## What the files hold
 

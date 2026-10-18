@@ -285,6 +285,59 @@ return the right objects. The cost is time: one forward pass per prompt, 5.4× G
 offline that is ~95 minutes for this bag. **SAM 3 is the instance backend; `--min-obs 3–4` the
 setting for it**, and trimming the prompt list to what a site actually needs is the speed knob.
 
+### One id per object (2026-10-18)
+
+For one map there should be no duplicate ids, and the SAM 3 run had them: 15 cross-class
+footprint overlaps (SAM 3 fires `door` and `cabinet` on one steel cabinet; one staircase came out
+as four objects, `stairs` and `escalator`), one same-class overlap, and thin 2–3-observation
+slivers of sofas. Association joins observations only within a coarse group and only when their
+points interleave, so it cannot fix either. `instances.py` now runs a `dedup` pass after the
+association and **before** `--min-obs` (fragments pool their observations instead of being
+filtered one by one):
+
+1. merge any two objects whose 5–95 % boxes overlap in plan by half of the smaller, overlap in
+   height and have comparable volume; class by summed vote;
+2. merge two objects of one group (or a confusable pair, `stairs` / `escalator`) within 0.3 m;
+3. both only if the result fits its class's size (`MAX_DIAG`: sofa 2.8 m, chair 1.4 m, …), and
+   **never when a frame that saw both saw them as separate masks**. Two masks of one image cover
+   the same pixels exactly when they got the same patch points, so the images decide what
+   geometry cannot: the steel cabinet's `door` and `cabinet` share their points (merged), the
+   trash can beside it shares none (kept). Staircases and escalators are exempt from that veto,
+   because one frame shows a staircase's two flights as two masks.
+
+The first version had no image veto and merged the trash can into the cabinet; the second
+vetoed the staircase's two flights. Result, SAM 3 segments, `--min-obs 4`
+(`semantic/instances_sam3_dedup_minobs4/`):
+
+| | before | after |
+|---|---|---|
+| objects | 101 | 104 (fragments that pooled past the threshold) |
+| same-class / cross-class footprint overlaps | 1 / 4 | 0 / 2, both real neighbours (trash can beside the cabinet, a steel cart in front of a counter) |
+| one staircase | 1 id (the other three filtered out) | 1 id holding all observations |
+| teal lounge boxes (~18–21 pieces) | 21 | 21, one per piece; the overlapping pair merged |
+| trash can, extinguisher | kept | kept |
+
+`--min-obs 3` keeps more small objects but leaves ~7 slivers in the lounge; 4 is the setting.
+Ids are still per run: a re-run renumbers them, which matters once the backend stores them.
+
+### Looking at it: the semantic octomap (2026-10-18)
+
+`tools/semantic_offline/semantic_octomap_viewer.py` writes one HTML page with `octomap.bt`'s
+occupied cells coloured by class and the SAM 3 objects on top. The octomap and the fused
+semantics share one grid (a 0.1 m octree cell is a fuse.py voxel key), so the join is a lookup,
+no registration; 41 % of the 788 k occupied cells carry a voxel class. What it took to make the
+objects sit *on* the octomap rather than over it:
+
+- objects are painted onto the cells they cover (mask points as seeds, region growing through
+  occupied cells bounded by class size and height, 21 k → 40 k cells), and boxes are refitted
+  to the painted cells;
+- heights are measured from the floor the robot walked (keyframe z − lidar height). A local
+  minimum floor is wrong on this site: the glossy floor leaves mirror-ghost cells 0.1–0.4 m
+  below it, the minimum found them and the real floor read as an object to grow into;
+- tags anchor on one of the object's own cells (the centroid of a sofa's frame is empty air) and
+  are sprites in the scene, depth-tested, because an HTML overlay draws in front of everything
+  and reads as floating.
+
 ## References
 
 - [gfchen01/semantic_mapping_with_360_camera_and_3d_lidar](https://github.com/gfchen01/semantic_mapping_with_360_camera_and_3d_lidar):
