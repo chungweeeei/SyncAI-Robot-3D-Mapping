@@ -114,6 +114,7 @@ on MPS for 18 prompts, 5.4× Grounding DINO. Decision: SAM 3 is the instance bac
 
 - Prompt list per site, to bring SAM 3's time down; and Jetson feasibility (unmeasured).
 - A "not found" rule for object queries.
+- Stable object ids across re-runs (match the previous objects.json by position and class), once the backend stores ids. Duplicate ids within one map are handled (`dedup`, see semantic-mapping.md).
 - Keepout-mask generation from `map_semantic_clean.pcd` (section 2, item 1), checked on the
   glass façade and the escalator of this map.
 - Send one object's goal pose to `navigate_to_goal` on the robot or in simulation and judge where

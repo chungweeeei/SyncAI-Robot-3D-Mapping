@@ -168,9 +168,11 @@ class Obj:
         self.labels: dict[str, float] = defaultdict(float)
         self.obs = 0
         self.views: list = []  # (score, kf, image idx, dist, crop jpg, rgb sample)
+        self.seen: dict[int, set] = defaultdict(set)  # image idx -> 1 cm keys of its points
         self._tree = None
 
     def add(self, s):
+        self.seen[s["j"]] |= set(keys(s["p"], 0.01).tolist())
         self.pts = np.concatenate([self.pts, s["p"]])
         for key in np.unique(keys(s["p"], FINE)):
             self.f[int(key)] += 1
@@ -183,6 +185,8 @@ class Obj:
         self._tree = None
 
     def absorb(self, o: "Obj"):
+        for j, k in o.seen.items():
+            self.seen[j] |= k
         self.pts = np.concatenate([self.pts, o.pts])
         for key, n in o.f.items():
             self.f[key] += n
@@ -294,6 +298,123 @@ def associate(segments, a):
     return objs
 
 
+# Largest plausible xy diagonal per class, m, for the duplicate merge: two side-by-side sofas
+# (4+ m together) must not become one. Unlisted classes get DEFAULT_MAX_DIAG.
+MAX_DIAG = {
+    "sofa": 2.8, "armchair": 1.6, "chair": 1.4, "bench": 3.5, "table": 3.5, "counter": 6.0,
+    "shelf": 4.0, "cabinet": 4.0, "door": 2.5, "stairs": 8.0, "escalator": 8.0,
+    "vending machine": 1.8, "screen": 2.5, "signboard": 2.5,
+}  # fmt: skip
+DEFAULT_MAX_DIAG = 2.0
+# Labels the detector swaps for one physical thing, beyond what the coarse groups already join
+# (seat: sofa / armchair / chair / bench; table: table / counter; storage: shelf / cabinet).
+CONFUSABLE = [{"stairs", "escalator"}]
+# Structures one frame can show as several masks (a staircase's two flights): for these a
+# "different" from co_observed means parts, not neighbours, and the geometry decides.
+MULTI_PART = {"stairs", "escalator"}
+
+
+def robust_box(pts):
+    """5-95 percentile box: a few stray points must not decide what touches what."""
+    lo, hi = np.percentile(pts, 5, axis=0), np.percentile(pts, 95, axis=0)
+    return lo, hi
+
+
+def label_of(o):
+    return max(o.labels, key=o.labels.get)
+
+
+def co_observed(o, q):
+    """What the images say about two objects, from the frames that saw both. Two masks of one
+    image cover the same pixels exactly when they got the same patch points, so: "same" if in a
+    shared frame they share most points (one thing, two labels: SAM 3 fires both `door` and
+    `cabinet` on a steel cabinet), "different" if in a shared frame they share almost none (two
+    things side by side: a trash can beside that cabinet), None if no frame saw both."""
+    verdict = None
+    for j in o.seen.keys() & q.seen.keys():
+        a, b = o.seen[j], q.seen[j]
+        share = len(a & b) / max(1, min(len(a), len(b)))
+        if share < 0.2:
+            return "different"
+        if share >= 0.5:
+            verdict = "same"
+    return verdict
+
+
+def dedup(objs, a):
+    """One map, one id per physical object. Association joins observations only within a coarse
+    group and only when their points interleave, which leaves two kinds of duplicates (measured
+    on dp1f_with_image with SAM 3: 15 cross-class footprint overlaps, and same-class slivers of
+    sofas seen from one side): merge
+    1. any two objects whose robust boxes overlap in plan by >= half of the smaller, overlap in
+       height, and are of comparable volume (a trash can beside a cabinet stays two objects);
+    2. two objects of one group (or a CONFUSABLE pair) whose boxes are within --dedup-gap,
+    both only if the result still fits its class's MAX_DIAG, and never when a frame that saw both
+    saw them as separate masks (co_observed). The class is the vote winner.
+    Runs before --min-obs, so fragments pool their observations instead of being filtered."""
+    merges = [0, 0]
+    changed = True
+    while changed:
+        changed = False
+        objs.sort(key=lambda o: -len(o.pts))
+        boxes = [robust_box(o.pts) for o in objs]
+        alive = [True] * len(objs)
+        for i, o in enumerate(objs):
+            if not alive[i]:
+                continue
+            for j in range(i + 1, len(objs)):
+                if not alive[j]:
+                    continue
+                q = objs[j]
+                (lo_i, hi_i), (lo_j, hi_j) = boxes[i], boxes[j]
+                if np.linalg.norm((lo_i[:2] + hi_i[:2]) / 2 - (lo_j[:2] + hi_j[:2]) / 2) > 8.0:
+                    continue
+                ext_i = np.maximum(hi_i - lo_i, 0.1)
+                ext_j = np.maximum(hi_j - lo_j, 0.1)
+                inter = np.clip(np.minimum(hi_i, hi_j) - np.maximum(lo_i, lo_j), 0, None)
+                plan = inter[0] * inter[1] / min(ext_i[0] * ext_i[1], ext_j[0] * ext_j[1])
+                height = inter[2] / min(ext_i[2], ext_j[2])
+                vol = min(np.prod(ext_i), np.prod(ext_j)) / max(np.prod(ext_i), np.prod(ext_j))
+                gap = np.linalg.norm(
+                    np.clip(np.maximum(lo_i, lo_j)[:2] - np.minimum(hi_i, hi_j)[:2], 0, None)
+                )
+                li, lj = label_of(o), label_of(q)
+                kin = o.group == q.group or any({li, lj} <= c for c in CONFUSABLE)
+                rule = (
+                    0
+                    if (plan >= 0.5 and height >= 0.3 and vol >= 0.25)
+                    else 1
+                    if (kin and gap <= a.dedup_gap)
+                    else -1
+                )
+                seen = co_observed(o, q)
+                if seen == "different" and {li, lj} <= MULTI_PART:
+                    seen = None
+                if seen == "different":  # the images saw them apart: geometry does not overrule
+                    continue
+                if seen == "same" and plan > 0:
+                    rule = 0
+                if rule < 0:
+                    continue
+                votes = defaultdict(float, o.labels)
+                for k, v in q.labels.items():
+                    votes[k] += v
+                winner = max(votes, key=votes.get)
+                lo, hi = np.minimum(lo_i, lo_j), np.maximum(hi_i, hi_j)
+                if np.linalg.norm(hi[:2] - lo[:2]) > MAX_DIAG.get(winner, DEFAULT_MAX_DIAG):
+                    continue
+                o.absorb(q)
+                o.group = group_of(winner)
+                alive[j] = False
+                boxes[i] = robust_box(o.pts)
+                lo_i, hi_i = boxes[i]
+                merges[rule] += 1
+                changed = True
+        objs = [o for o, k in zip(objs, alive) if k]
+    print(f"dedup: {merges[0]} overlap merges, {merges[1]} fragment merges -> {len(objs)} objects")
+    return objs
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("map_dir")
@@ -336,6 +457,8 @@ def main():
     ap.add_argument(
         "--segment-eps", type=float, default=0.4, help="DBSCAN radius cleaning a mask's points, m"
     )
+    ap.add_argument("--dedup-gap", type=float, default=0.3, help="fragments this close merge, m")
+    ap.add_argument("--no-dedup", action="store_true", help="skip the duplicate merge")
     ap.add_argument("--max-extent", type=float, default=3.5, help="largest object xy diagonal, m")
     ap.add_argument("--max-range", type=float, default=8.0, help="ignore mask points farther, m")
     ap.add_argument("--model", default="google/siglip2-so400m-patch14-384")
@@ -365,6 +488,8 @@ def main():
         pickle.dump(segments + [meta_run], open(cache, "wb"))
     n_masks = meta_run["masks"]
     objs = associate(segments, a)
+    if not a.no_dedup:
+        objs = dedup(objs, a)
     keep = []
     for o in objs:
         if o.obs < a.min_obs:
@@ -437,6 +562,12 @@ def main():
         )
         rows.append(emb[i] / max(np.linalg.norm(emb[i]), 1e-9))
     np.save(out / "objects_emb.npy", np.array(rows, np.float16))
+    # each object's 0.1 m cells (floor(x / 0.1), the octomap's and fuse.py's grid), so a viewer or
+    # a later pass can paint the object onto the octomap instead of floating a box over it
+    np.savez_compressed(
+        out / "objects_voxels.npz",
+        **{f"id_{oid}": np.floor(pts / FINE).astype(np.int32) for oid, (_, pts) in enumerate(keep)},
+    )
     json.dump(
         {
             "frame_id": "map",

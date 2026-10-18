@@ -60,6 +60,7 @@
 
 - 依場地調整提示詞清單以縮短 SAM 3 的時間；以及在 Jetson 上的可行性（尚未量測）。
 - 物體查詢的「找不到」規則。
+- 重跑之間的穩定物體 id（以位置和類別配對上一版 objects.json），等 backend 開始存 id 時再做。同一張地圖內的重複 id 已處理（`dedup`，見 semantic-mapping.md）。
 - 從 `map_semantic_clean.pcd` 產生 keepout mask（第 2 節第 1 項），並在這張地圖的玻璃帷幕和手扶梯上檢查。
 - 把某個物體的目標 pose 送給機器人或模擬環境的 `navigate_to_goal`，看停的位置是否合理；離線無法驗證。
 - `save_maps` 在 `poses.txt` 旁輸出 `stamps.txt`。
