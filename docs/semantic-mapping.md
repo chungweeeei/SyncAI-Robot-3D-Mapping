@@ -69,7 +69,9 @@ comparison reports exactly this).
 | OpenSeg / SAN / CAT-Seg / MaskCLIP | any text | per-pixel CLIP feature | open-vocabulary query after mapping | memory-hungry voxels; OpenSeg is TF-only |
 
 Start with Mask2Former ADE20K for traversability classes; add Grounded-SAM later for object
-instances; feature maps only if post-hoc text query becomes a requirement.
+instances; feature maps only if post-hoc text query becomes a requirement. Seven backends were
+then run through the same projection and fusion on 2026-10-17 — see "2D backend comparison"
+below for what actually separates them on our data.
 
 ## Camera: what exists and what is missing
 
@@ -153,6 +155,120 @@ What it says about the plan:
 - Fusion is per patch at keyframe density (0.5 m / 10°); labelling every scan between keyframes
   would multiply the votes per voxel, at 10× the segmentation cost.
 
+## 2D backend comparison (2026-10-17, `dp1f_with_image`)
+
+The same replay (1066 keyframes this time — a real-time replay is not bit-for-bit repeatable —
+13 loops, 8.2 M points, `clean_map` ok in 84 s), the same keyframe stamps, projection and fusion,
+and only the 2D model swapped (`tools/semantic_offline/segment.py`, one class per backend). The
+runs live in `map/dp1f_with_image/semantic/<tag>/`, the table and a page with every run's
+top-down renders and QA overlays side by side in `semantic/compare/compare.{md,html}` (raw
+fusion) and `semantic/compare_clean/` (masked by the cleaned `map.pcd`).
+
+There is no annotated ground truth, so `compare.py` scores against two things: the map's own
+geometry (height over the local floor from the nearest keyframe minus the 0.481 m lidar height,
+and the voxel normal), and the Swin-L reference run, after folding every label space into 16
+coarse classes (`taxonomy.py`). "floor low+flat" is the share of floor-labelled voxels within
+0.25 m of the floor with a near-vertical normal; "geo-floor → floor" is the share of labelled
+voxels *with* floor geometry that got the floor label. The ceiling rate is weak on purpose
+(ducts, beams and the mezzanine count against it) and is only comparable across rows. Times
+are seconds per 1280×720 image on this Mac's MPS, including the upsampling back to full
+resolution and the boundary mask; use them as ratios.
+
+| run | s / image | labelled | purity | floor low+flat | geo-floor → floor | wall vertical | agree w/ Swin-L |
+|---|---|---|---|---|---|---|---|
+| Mask2Former Swin-L ADE20K (reference) | 0.96 | 31 % | 0.95 | 80 % | 98 % | 82 % | – |
+| Mask2Former Swin-T ADE20K | 0.53 | 31 % | 0.95 | 81 % | 97 % | 80 % | 88 % |
+| SegFormer-B5 ADE20K 640 | 0.62 | 32 % | 0.96 | 80 % | 98 % | 82 % | 89 % |
+| SegFormer-B2 ADE20K 512 | 0.40 | 32 % | 0.96 | 79 % | 98 % | 81 % | 87 % |
+| OneFormer Swin-L ADE20K | 1.27 | 32 % | 0.95 | 81 % | 97 % | 81 % | 92 % |
+| Mask2Former Swin-L COCO panoptic | 1.29 | 32 % | 0.93 | 81 % | 97 % | 80 % | 83 % |
+| Grounding DINO tiny + SAM ViT-B (18 prompts, every 3rd keyframe) | 3.45 | 8 % | 0.97 | 84 % | 99 % | 96 % | 90 % |
+
+Coarse class shares of the labelled voxels, raw fusion (%):
+
+| run | floor | wall | ceiling | door | person | seat | table | column | window | storage | other |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| Swin-L ADE | 36.5 | 34.7 | 18.3 | 0.9 | 0.4 | 2.0 | 0.8 | 0.9 | 2.2 | 1.2 | 0.9 |
+| Swin-T ADE | 36.1 | 37.9 | 17.5 | 0.8 | 0.3 | 1.3 | 0.4 | 1.5 | 2.2 | 0.2 | 0.5 |
+| SegFormer-B5 | 36.7 | 36.1 | 20.4 | 0.6 | 0.4 | 1.4 | 0.3 | 0.6 | 2.3 | 0.2 | 0.3 |
+| SegFormer-B2 | 37.0 | 36.5 | 21.2 | 0.5 | 0.4 | 1.2 | 0.1 | 0.3 | 1.7 | 0.1 | 0.3 |
+| OneFormer Swin-L | 35.9 | 35.1 | 17.3 | 1.2 | 0.3 | 2.2 | 1.6 | 1.3 | 1.9 | 0.4 | 0.9 |
+| Swin-L COCO | 35.3 | 30.2 | 16.0 | 1.7 | 0.4 | 3.5 | 0.7 | 0.0 | 5.4 | 0.8 | 3.7 |
+| Grounded-SAM | 75.0 | 6.3 | 6.3 | 1.7 | 0.9 | 3.1 | 0.5 | 1.5 | 1.6 | 0.9 | 0.0 |
+
+What the numbers say:
+
+- **On the traversability classes the model does not matter.** Every ADE20K model lands within
+  two points of the others on floor / wall / ceiling, with the same coverage (16 % of each patch,
+  31 % of the voxels — the frustum, not the model, sets it) and the same purity. The floor layer
+  of the map (`view_topdown_lowband*.jpg`) is interchangeable between them.
+- **The models differ on objects and on mask edges.** Swin-L and OneFormer find roughly twice the
+  seat / table / storage / column voxels that SegFormer-B2 does (2.0 / 0.8 / 1.2 / 0.9 % against
+  1.2 / 0.1 / 0.1 / 0.3 %), and B2's masks are blobbier: in the QA overlays the floor bleeds up
+  around people's feet and the ceiling / wall boundary wanders. The voxel disagreement with the
+  reference (8–13 % for the ADE models) sits almost entirely there; the reference-confusion in
+  `compare.json` shows floor agreeing at 97–99 %, wall at 86–92 %, ceiling at 88–95 %.
+- **SegFormer-B2 is the on-robot candidate.** 2.4× faster than Swin-L here (and a 27 M-parameter
+  model that TensorRT handles on a Jetson), for a floor / wall / ceiling layer that is the same.
+  Re-run the large model offline after a save, from the patches, when object labels matter.
+- **COCO panoptic buys nothing on this site.** It reads the glass façade as `window` (5.4 %),
+  puts 3.7 % into classes outside the taxonomy, and agrees least with the reference (83 %); its
+  wall precision against the reference is 77 %. ADE20K's 150 classes already cover what the map
+  needs (floor, wall, stairs, escalator, door, person, column).
+- **Grounded-SAM is an object pass, not a semantic model.** Boxes are the wrong primitive for
+  stuff: only 8 % of the voxels get a label and 75 % of those are floor; walls and ceilings go
+  almost unlabelled (the few it does label are right, hence the 96 % wall rate). It does find the
+  seats, doors, stairs and people (3.1 / 1.7 / 1.0 / 0.9 %) with the cleanest per-object masks of
+  the seven, at 3.5 s per image — ~10× the closed-set models. If object instances are wanted, run
+  it as a second pass on top of an ADE20K stuff map, not instead of one; SAM 3 and the single-pass
+  EOVSAM (references) are the versions to try when that happens.
+- **The pipeline's own limits still dominate the model's.** Coverage (31 % of voxels labelled),
+  the hand-measured extrinsic, and the ~1500 `person` ghost voxels every model carries into the raw
+  fusion (the masked variant halves them, because `clean_map` has already removed the points)
+  move the result more than any backend swap. Model choice is settled for now: next is coverage
+  and calibration, then the keyframe stamp sidecar so the replay recording goes away.
+
+Two things the run turned up about the tooling: `poses.txt` still has no stamps, so the replay
+recording is still needed, and a workspace whose `build/` has been deleted leaves
+`install/syncai_common` as dangling `--symlink-install` links — the C++ nodes keep running, but
+`ros2 service call` cannot import the service type (`replay.sh` now checks before playing;
+rebuilding the package into a scratch prefix is enough).
+
+## Object map (2026-10-18, `dp1f_with_image`)
+
+The semantic voxels answer "what is here"; "where is the green sofa" needs objects. Two ways to
+get them were tried on the same replay, both ending in the same `objects.json` (class, colour
+word, up to three crops, a SigLIP 2 embedding of the crops, a free floor pose 0.6–1.5 m away
+facing the object) and the same text query (`query_objects.py`, Chinese or English, cosine over
+the object embeddings). Outputs: `semantic/objects/` and `semantic/instances_grounded-sam/`.
+
+| | clustering (`objects.py`) | masks + association (`instances.py`) |
+|---|---|---|
+| source | DBSCAN on the Swin-L map's "thing" voxels | Grounding DINO + SAM masks every 2nd keyframe, projected, associated |
+| time | ~2 min on top of the semantic run | 18 min segmentation (2.0 s / image), association seconds from the cache |
+| objects | 114 | 188 |
+| teal lounge: sofa / armchair boxes (~18–21 pieces in the map) | 26, several sofas boxed twice | 20, boxes thinner (only the faces seen), a few sofas missed |
+| crops | low-angle, often half a sofa | one whole object per crop (the mask's box) |
+| false positives | few (ADE classes are reliable on furniture) | many: "escalator" on corridors, glass doors and the staircase, "armchair" on bar stools and dining chairs |
+| small things | none (below the voxel threshold) | fire extinguisher, trash can, ATM-like machines found |
+
+Both answer "綠色沙發" / "green sofa" with the dark teal sofas by the façade, and "grey leather
+armchair" with the grey-olive ones in the north lounge. The colour word is unreliable (teal reads
+`cyan` or `black`, grey-olive reads `green`; the white balance is latched), the embedding is not.
+Rank by cosine: with the prompt ensemble SigLIP's sigmoid is near 1 for every object of the right
+class, so "not found" needs its own rule (margin to the second hit, or class + embedding).
+
+Association lessons, each from a failed run: shared 0.2 m voxels miss (two views hit different
+faces of a sofa); an unbounded footprint rule chains a lounge into 5–7 m "sofas"; nearness has to
+be measured in the floor plane; and a mask's ~20 LiDAR points include a few that went through a
+gap onto something behind (robust footprint 1.4 m, full 2.4 m, p90 4.4 m), so each segment is cut
+to its largest 3D cluster first. After that the footprints are plausible (median 1.1 m).
+
+What limits it now is the detector, not the association: Grounding DINO's labels are the false
+positives above. SAM 3 is the planned replacement; its backend is written (`instance_seg.py`)
+but the `facebook/sam3` checkpoint is gated and was not available on 2026-10-18, so it has not
+been run.
+
 ## References
 
 - [gfchen01/semantic_mapping_with_360_camera_and_3d_lidar](https://github.com/gfchen01/semantic_mapping_with_360_camera_and_3d_lidar):
@@ -173,3 +289,11 @@ What it says about the plan:
   inference needs only the point cloud, but needs re-pre-training on our LiDAR and scenes.
 - [direct_visual_lidar_calibration](https://github.com/koide3/direct_visual_lidar_calibration):
   LiDAR-camera extrinsic calibration from a bag.
+- [SAM 3: Segment Anything with Concepts](https://github.com/facebookresearch/sam3) and
+  [EOVSAM (2026)](https://www.alphaxiv.org/abs/2608.02284): text-prompted instance segmentation
+  and its single-pass semantic variant — the open-vocabulary backend to try after Grounded-SAM
+  (one pass per concept is what makes the latter ~10× slower than the closed-set models).
+- [FUS3DMaps (2026)](https://arxiv.org/pdf/2605.03669), [OpenVox (2025)](https://arxiv.org/html/2502.16528v1),
+  [SLAMVDB](https://robogroup.edi.lv/technology/slamvdb): open-vocabulary voxel maps with a
+  dense and an instance layer (the last one ROS 2 packages with vision-language embeddings per
+  voxel) — where this pipeline would go if text query after mapping becomes a requirement.
