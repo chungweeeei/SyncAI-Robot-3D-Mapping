@@ -2,13 +2,15 @@
 
 #include <Eigen/Eigenvalues>
 #include <algorithm>
+#include <cmath>
 
 namespace
 {
 // Scan Context: candidates kept by the ring-key preselection.
 constexpr size_t kScRingKeyCandidates = 10;
-// A Scan Context candidate's coarse stage, relative to the fine one.
-constexpr double kScCoarseFactor = 3.0;
+// The coarse stage (Scan Context candidates, and radius candidates beyond loop_search_radius),
+// relative to the fine one: 3x voxel and 3x correspondence distance, so a ~3 m offset converges.
+constexpr double kCoarseFactor = 3.0;
 // After a loop, smoothAndUpdate runs at least kMinLoopIterations extra iSAM2 steps (upstream's
 // fixed count), then until the newest keyframe moves less than kLoopSettledTangent (tangent norm,
 // rad and m) per step, at most kMaxLoopIterations.
@@ -68,7 +70,7 @@ PoseGraphOptimizer::PoseGraphOptimizer(const PoseGraphOptimizerConfig & config) 
   m_gicp_coarse.setCorrespondenceRandomness(m_config.loop_gicp_num_neighbors);
   m_gicp_coarse.setRegistrationType("GICP");
   m_gicp_coarse.setMaximumIterations(50);
-  m_gicp_coarse.setMaxCorrespondenceDistance(kScCoarseFactor * m_config.loop_gicp_max_corr_dist);
+  m_gicp_coarse.setMaxCorrespondenceDistance(kCoarseFactor * m_config.loop_gicp_max_corr_dist);
   m_gicp_coarse.setTransformationEpsilon(1e-6);
 }
 
@@ -183,40 +185,49 @@ CloudType::Ptr PoseGraphOptimizer::getSubMap(int idx, int half_range, double res
 
 std::vector<PoseGraphOptimizer::LoopCandidate> PoseGraphOptimizer::radiusCandidates(size_t cur_idx)
 {
-  std::vector<LoopCandidate> ret;
   const KeyPoseWithCloud & cur = m_key_poses[cur_idx];
-  pcl::PointXYZ cur_pt;
-  cur_pt.x = cur.t_global(0);
-  cur_pt.y = cur.t_global(1);
-  cur_pt.z = cur.t_global(2);
 
-  pcl::PointCloud<pcl::PointXYZ>::Ptr key_poses_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+  // How far (xy) a past keyframe may lie from the current estimate. A fixed loop_search_radius
+  // never sees a revisit whose drift exceeds it, although the drift gate would accept a
+  // correction of up to loop_max_drift_ratio of the path: with the defaults, 1 m against 5 m
+  // after 100 m. With loop_radius_drift_scaled the search uses the gate's own bound, per
+  // candidate, capped at what the coarse GICP stage can still pull in from the current estimate
+  // (the guess); beyond that it cannot converge and the candidate only costs a registration.
+  // z stays at loop_search_radius: loops do not correct z (planar), so a revisit is on the same
+  // level, and a floor above is not one.
+  const bool scaled = m_config.loop_radius_drift_scaled && m_config.loop_max_drift_ratio > 0.0;
+  const double cap = m_config.loop_search_radius + kCoarseFactor * m_config.loop_gicp_max_corr_dist;
+
+  // A linear scan, not a KD-tree: a per-candidate radius does not fit one search, and a few
+  // thousand keyframes cost nothing next to one GICP.
+  std::vector<std::pair<double, size_t>> near;  // (xy distance, index)
   for (size_t i = 0; i < cur_idx; i++) {
-    pcl::PointXYZ pt;
-    pt.x = m_key_poses[i].t_global(0);
-    pt.y = m_key_poses[i].t_global(1);
-    pt.z = m_key_poses[i].t_global(2);
-    key_poses_cloud->push_back(pt);
+    const KeyPoseWithCloud & kp = m_key_poses[i];
+    if (std::abs(cur.time - kp.time) <= m_config.loop_time_tresh) continue;
+    if (std::abs(kp.t_global.z() - cur.t_global.z()) > m_config.loop_search_radius) continue;
+    double allowed = m_config.loop_search_radius;
+    if (scaled)
+      allowed = std::min(
+        cap, std::max(allowed, m_config.loop_max_drift_ratio * (cur.travelled - kp.travelled)));
+    const double d = (kp.t_global - cur.t_global).head<2>().norm();
+    if (d <= allowed) near.emplace_back(d, i);
   }
+  std::sort(near.begin(), near.end());
 
-  // TODO: the KD-tree over every keyframe is rebuilt on each call.
-  pcl::KdTreeFLANN<pcl::PointXYZ> kdtree;
-  kdtree.setInputCloud(key_poses_cloud);
-  std::vector<int> ids;
-  std::vector<float> sqdists;
-  if (kdtree.radiusSearch(cur_pt, m_config.loop_search_radius, ids, sqdists) == 0) return ret;
-
-  // Far enough apart in time, and more than a submap apart in index from any chosen candidate
-  // (closer ones would verify against nearly the same submap).
+  // Nearest first, and more than a submap apart in index from any chosen candidate (closer ones
+  // would verify against nearly the same submap).
+  std::vector<LoopCandidate> ret;
   const int min_gap = 2 * m_config.loop_submap_half_range + 1;
   const size_t max_candidates = static_cast<size_t>(std::max(1, m_config.loop_max_candidates));
-  for (int idx : ids) {
-    if (std::abs(cur.time - m_key_poses[idx].time) <= m_config.loop_time_tresh) continue;
+  for (const auto & [d, idx] : near) {
     bool near_chosen = false;
     for (const LoopCandidate & c : ret)
-      if (std::abs(idx - static_cast<int>(c.target_id)) < min_gap) near_chosen = true;
+      if (std::abs(static_cast<int>(idx) - static_cast<int>(c.target_id)) < min_gap)
+        near_chosen = true;
     if (near_chosen) continue;
-    ret.push_back({static_cast<size_t>(idx), cur.r_global, cur.t_global, false, 0.0});
+    // Beyond loop_search_radius the drift can exceed the fine stage's correspondence distance.
+    const bool coarse = d > m_config.loop_search_radius;
+    ret.push_back({idx, cur.r_global, cur.t_global, false, coarse, 0.0});
     if (ret.size() >= max_candidates) break;
   }
   return ret;
@@ -230,7 +241,7 @@ bool PoseGraphOptimizer::scanContextCandidate(size_t cur_idx, LoopCandidate & ca
   // Ring keys are rotation-invariant, a cheap preselection. With the drift gate on, only targets
   // it could pass are considered (the guess puts the current keyframe on the target, so the
   // correction is about their distance, plus the coarse stage's reach).
-  const double reach = kScCoarseFactor * m_config.loop_gicp_max_corr_dist;
+  const double reach = kCoarseFactor * m_config.loop_gicp_max_corr_dist;
   std::vector<std::pair<float, size_t>> by_key;
   for (size_t i = 0; i < cur_idx; i++) {
     const KeyPoseWithCloud & kp = m_key_poses[i];
@@ -271,6 +282,7 @@ bool PoseGraphOptimizer::scanContextCandidate(size_t cur_idx, LoopCandidate & ca
     yawRotation(yawOf(tgt.r_global) + ScanContext::yawOfShift(best_shift)) * cur_tilt;
   candidate.t_init = tgt.t_global;
   candidate.scan_context = true;
+  candidate.coarse = true;
   candidate.sc_dist = best_dist;
   return true;
 }
@@ -281,6 +293,7 @@ bool PoseGraphOptimizer::verifyCandidate(
   report.target_id = candidate.target_id;
   report.source_id = cur_idx;
   report.scan_context = candidate.scan_context;
+  report.coarse = candidate.coarse;
   report.sc_dist = candidate.sc_dist;
   const KeyPoseWithCloud & cur = m_key_poses[cur_idx];
 
@@ -296,9 +309,9 @@ bool PoseGraphOptimizer::verifyCandidate(
 
   M4F guess = M4F::Identity();
   CloudType::Ptr aligned(new CloudType);
-  if (candidate.scan_context) {
+  if (candidate.coarse) {
     // Coarse first: the guess can be metres off, beyond the fine stage's correspondence distance.
-    const double coarse_res = kScCoarseFactor * std::max(m_config.loop_submap_resolution, 0.05);
+    const double coarse_res = kCoarseFactor * std::max(m_config.loop_submap_resolution, 0.05);
     m_gicp_coarse.setInputSource(voxelized(source, coarse_res));
     m_gicp_coarse.setInputTarget(voxelized(target, coarse_res));
     m_gicp_coarse.align(*aligned);

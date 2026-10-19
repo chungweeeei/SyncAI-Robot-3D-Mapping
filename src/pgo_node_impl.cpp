@@ -28,6 +28,7 @@
 #include "syncai_mapping/dynamic_removal/edits.hpp"
 #include "syncai_mapping/dynamic_removal/recipe.hpp"
 #include "syncai_mapping/pgo_node.hpp"
+#include "syncai_mapping/pgos/map_writer.h"
 
 extern char ** environ;
 
@@ -382,6 +383,8 @@ void PGONode::loadParameters()
     this->declare_parameter("loop_min_xy_info_ratio", m_pgo_config.loop_min_xy_info_ratio);
   m_pgo_config.loop_max_drift_ratio =
     this->declare_parameter("loop_max_drift_ratio", m_pgo_config.loop_max_drift_ratio);
+  m_pgo_config.loop_radius_drift_scaled =
+    this->declare_parameter("loop_radius_drift_scaled", m_pgo_config.loop_radius_drift_scaled);
   m_pgo_config.loop_max_candidates =
     this->declare_parameter("loop_max_candidates", m_pgo_config.loop_max_candidates);
   m_pgo_config.loop_sc_enabled =
@@ -393,12 +396,14 @@ void PGONode::loadParameters()
   RCLCPP_INFO(
     this->get_logger(),
     "[PGONode] loop gates: overlap >= %.2f, inlier ratio (< %.2f m) >= %.2f, xy info ratio >= "
-    "%.3f%s, correction <= %.1f %% of the path, up to %d radius candidates | robust kernel %s "
+    "%.3f%s, correction <= %.1f %% of the path, up to %d radius candidates (reach %s) | robust "
+    "kernel %s "
     "(scale %.1f) | scan context %s (range %.1f m, dist <= %.2f)",
     m_pgo_config.loop_min_overlap_ratio, m_pgo_config.loop_inlier_dist,
     m_pgo_config.loop_min_inlier_ratio, m_pgo_config.loop_min_xy_info_ratio,
     m_pgo_config.loop_min_xy_info_ratio > 0.0 ? "" : " (<= 0: off)",
     100.0 * m_pgo_config.loop_max_drift_ratio, m_pgo_config.loop_max_candidates,
+    m_pgo_config.loop_radius_drift_scaled ? "drift-scaled" : "loop_search_radius",
     m_pgo_config.loop_robust_kernel.c_str(), m_pgo_config.loop_robust_kernel_scale,
     m_pgo_config.loop_sc_enabled ? "on" : "off", m_pgo_config.loop_sc_max_range,
     m_pgo_config.loop_sc_dist_tresh);
@@ -630,7 +635,16 @@ void PGONode::timerCB()
   pcl::fromROSMsg(*pair.cloud_msg, *cp.cloud);
   pair.cloud_msg.reset();
   // Re-runs isKeyPose(), which cannot change in between: we hold m_pgo_mutex.
-  m_pgo->addKeyPose(cp);
+  if (m_pgo->addKeyPose(cp) && m_node_config.map_cloud_resolution > 0) {
+    // The live merge's input, made here once rather than per merge (see preview_cloud).
+    const double res = m_node_config.map_cloud_resolution;
+    CloudType::Ptr preview(new CloudType);
+    pcl::VoxelGrid<PointType> voxel_filter;
+    voxel_filter.setLeafSize(res, res, res);
+    voxel_filter.setInputCloud(cp.cloud);
+    voxel_filter.filter(*preview);
+    m_pgo->keyPoses().back().preview_cloud = preview;
+  }
 
   m_pgo->searchForLoopPairs();
 
@@ -642,8 +656,9 @@ void PGONode::timerCB()
       this->get_logger(),
       "[PGONode][loop] candidate %zu -> %zu via %s%s | overlap %.2f inlier %.2f fitness %.4f "
       "xy info %.3f correction %.2f / %.2f m | %s%s",
-      c.target_id, c.source_id, c.scan_context ? "scan context" : "radius", sc, c.overlap_ratio,
-      c.inlier_ratio, c.fitness, c.xy_info_ratio, c.correction_m, c.allowed_m,
+      c.target_id, c.source_id,
+      c.scan_context ? "scan context" : (c.coarse ? "radius (coarse)" : "radius"), sc,
+      c.overlap_ratio, c.inlier_ratio, c.fitness, c.xy_info_ratio, c.correction_m, c.allowed_m,
       c.accepted ? "passed" : "rejected: ", c.reject_reason);
   }
 
@@ -729,22 +744,36 @@ void PGONode::publishMapCloud(builtin_interfaces::msg::Time & time)
 void PGONode::mergeAndPublishMapCloud(
   std::vector<KeyPoseWithCloud> snapshot, builtin_interfaces::msg::Time time, uint64_t seq)
 {
-  CloudType::Ptr merged(new CloudType);
-  for (const auto & kp : snapshot) {
-    CloudType::Ptr world_cloud(new CloudType);
-    pcl::transformPointCloud(
-      *kp.body_cloud, *world_cloud, kp.t_global, Eigen::Quaterniond(kp.r_global));
-    *merged += *world_cloud;
-  }
+  // Stacked from the per-keyframe previews, already at map_cloud_resolution, and re-voxelised
+  // whenever the stack passes kMergeVoxelEvery points: the merge stays the size of the place, not
+  // of the run. It used to stack every dense keyframe first, a second full copy of the run every
+  // map_cloud_pub_period, overlapping a save's. A voxel of voxels is not bit-identical to one
+  // pass over the dense clouds (the centroids shift by a fraction of a voxel); it is a preview.
+  constexpr size_t kMergeVoxelEvery = 2'000'000;
+  const double res = m_node_config.map_cloud_resolution;
+  pcl::VoxelGrid<PointType> voxel_filter;
+  if (res > 0) voxel_filter.setLeafSize(res, res, res);
+  auto voxelize = [&](CloudType::Ptr & cloud) {
+    CloudType::Ptr out(new CloudType);
+    voxel_filter.setInputCloud(cloud);
+    voxel_filter.filter(*out);
+    cloud = out;
+  };
 
-  if (m_node_config.map_cloud_resolution > 0) {
-    pcl::VoxelGrid<PointType> voxel_filter;
-    voxel_filter.setLeafSize(
-      m_node_config.map_cloud_resolution, m_node_config.map_cloud_resolution,
-      m_node_config.map_cloud_resolution);
-    voxel_filter.setInputCloud(merged);
-    voxel_filter.filter(*merged);
+  CloudType::Ptr merged(new CloudType);
+  CloudType world_cloud;
+  size_t since_voxel = 0;
+  for (const auto & kp : snapshot) {
+    const CloudType::Ptr & src = kp.preview_cloud ? kp.preview_cloud : kp.body_cloud;
+    pcl::transformPointCloud(*src, world_cloud, kp.t_global, Eigen::Quaterniond(kp.r_global));
+    *merged += world_cloud;
+    since_voxel += world_cloud.size();
+    if (res > 0 && since_voxel >= kMergeVoxelEvery) {
+      voxelize(merged);
+      since_voxel = 0;
+    }
   }
+  if (res > 0 && since_voxel > 0) voxelize(merged);
 
   // Already in the map frame. Subscriber counts re-read so a reader that left mid-merge costs
   // nothing.
@@ -1005,6 +1034,10 @@ void PGONode::saveMapsCB(
     return;
   }
 
+  // A live merge still running holds its own copy of the run's clouds; let it finish before the
+  // save adds to the peak. No new one can start: the timer that spawns them needs m_pgo_mutex.
+  if (m_map_cloud_thread.joinable()) m_map_cloud_thread.join();
+
   std::filesystem::path p_dir(request->file_path);
   std::filesystem::path patches_dir = p_dir / "patches";       // per-keyframe patch clouds
   std::filesystem::path poses_txt_path = p_dir / "poses.txt";  // per-frame pose list
@@ -1030,32 +1063,23 @@ void PGONode::saveMapsCB(
     }
     RCLCPP_INFO(this->get_logger(), "SAVE MAP TO %s", map_path.string().c_str());
 
-    // Only with patches: opening it truncates an existing poses.txt.
-    std::ofstream txt_file;
-    if (request->save_patches) txt_file.open(poses_txt_path);
-
-    CloudType::Ptr ret(new CloudType);
-    for (size_t i = 0; i < m_pgo->keyPoses().size(); i++) {
-      CloudType::Ptr body_cloud = m_pgo->keyPoses()[i].body_cloud;
-      if (request->save_patches) {
+    if (request->save_patches) {
+      // Opening it truncates an existing poses.txt.
+      std::ofstream txt_file(poses_txt_path);
+      for (size_t i = 0; i < m_pgo->keyPoses().size(); i++) {
         std::string patch_name = std::to_string(i) + ".pcd";
         std::filesystem::path patch_path = patches_dir / patch_name;
-        pcl::io::savePCDFileBinary(patch_path.string(), *body_cloud);
+        pcl::io::savePCDFileBinary(patch_path.string(), *m_pgo->keyPoses()[i].body_cloud);
         Eigen::Quaterniond q(m_pgo->keyPoses()[i].r_global);
         V3D t = m_pgo->keyPoses()[i].t_global;
         txt_file << patch_name << " " << t.x() << " " << t.y() << " " << t.z() << " " << q.w()
                  << " " << q.x() << " " << q.y() << " " << q.z() << std::endl;
       }
-      CloudType::Ptr world_cloud(new CloudType);
-      pcl::transformPointCloud(
-        *body_cloud, *world_cloud, m_pgo->keyPoses()[i].t_global,
-        Eigen::Quaterniond(m_pgo->keyPoses()[i].r_global));
-
-      *ret += *world_cloud;
     }
-    txt_file.close();
 
-    pcl::io::savePCDFileBinary(map_path.string(), *ret);
+    // Streamed, never merged in memory: see map_writer.h. Atomic, so a failed save leaves the
+    // previous map.pcd whole rather than truncated.
+    writeMergedMapPcd(map_path, m_pgo->keyPoses());
   } catch (const std::exception & e) {
     response->success = false;
     response->message = std::string("Save failed: ") + e.what() + "; the run is kept.";
@@ -1279,7 +1303,8 @@ void PGONode::removeMapCleanOutputs(const std::filesystem::path & map_dir)
 {
   std::error_code ec;
   std::filesystem::remove(map_dir / dynamic_removal::recipe::kSidecarFile, ec);
-  // A killed clean's half-written map.pcd (map.pcd itself is rewritten by the save).
+  // A killed clean's half-written map.pcd (map.pcd itself is rewritten by the save, through its
+  // own map.pcd.save.tmp).
   std::filesystem::remove(map_dir / (std::string(dynamic_removal::kMapFile) + ".tmp"), ec);
   // An old octomap.bt would describe the previous run, and so would the copy
   // apply_octomap_edits set aside before patching it. octomap_edits.json

@@ -61,6 +61,11 @@
     # Max loop correction as a fraction of the path between its two keyframes
     # (floored at loop_search_radius); rejects look-alike places. <= 0 = off.
     loop_max_drift_ratio: 0.05
+    # Radius search reach. true: per candidate, the drift gate's bound above,
+    # capped at loop_search_radius + 3 * loop_gicp_max_corr_dist (what the
+    # coarse GICP stage can pull in); farther candidates go coarse to fine.
+    # false: loop_search_radius only, so drift beyond 1 m never closes a loop.
+    loop_radius_drift_scaled: true
     loop_max_candidates: 3        # int; radius candidates verified per search
     # Scan Context: global candidates when the radius search accepts nothing.
     # Off until validated on this site's replays (indoor look-alikes).
