@@ -102,6 +102,10 @@ def segment_frames(a, map_dir, names, kt, kq, kfs, cam, T_cam_body, odom, idx, k
         uv = project(cam, pc[ci])
         ins = (uv[:, 0] >= 0) & (uv[:, 0] < W) & (uv[:, 1] >= 0) & (uv[:, 1] < H)
         ci, uv, zc = ci[ins], uv[ins], z[ci][ins]
+        # nothing of the patch in view (as in label_patches, a patch can project wholly past the
+        # border): the run-start mask below needs at least one point
+        if not len(ci):
+            continue
         # occlusion: nearest point per 8 px cell (as in label_patches)
         cell = (uv[:, 1].astype(int) // 8) * (W // 8 + 1) + uv[:, 0].astype(int) // 8
         order = np.lexsort((zc, cell))

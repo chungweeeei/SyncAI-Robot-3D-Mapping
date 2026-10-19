@@ -139,6 +139,9 @@ def main():
                 u, v = uv[:, 0], uv[:, 1]
                 inside = (u >= 2) & (u < W - 2) & (v >= 2) & (v < H - 2)
                 ci, u, v, zc = ci[inside], u[inside], v[inside], z[ci][inside]
+            # a patch whose cone points all project past the image border (dp1f_1019_with_image
+            # had one) leaves nothing here, and the run-start mask below needs at least one point
+            if len(ci):
                 # occlusion: keep points within 10 % (min 0.3 m) of the nearest point of their cell
                 cell = (v.astype(int) // a.cell) * (W // a.cell + 1) + (u.astype(int) // a.cell)
                 order = np.lexsort((zc, cell))
