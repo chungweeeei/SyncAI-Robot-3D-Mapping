@@ -116,6 +116,13 @@ struct PoseGraphOptimizerConfig
   // while a look-alike place (symmetric corridor, far side of a hall) asks for a jump of its
   // separation. Matters most for Scan Context, whose candidates ignore the estimate. <= 0 = off.
   double loop_max_drift_ratio = 0.05;
+  // Radius search reach (xy): false = loop_search_radius only, true = per candidate the drift
+  // gate's bound max(loop_search_radius, loop_max_drift_ratio * path), capped at
+  // loop_search_radius + the coarse stage's reach (3 * loop_gicp_max_corr_dist). Candidates
+  // beyond loop_search_radius are registered coarse to fine. z is held to loop_search_radius
+  // either way. Without it, a revisit whose drift exceeds loop_search_radius is never a
+  // candidate, however much the drift gate would allow.
+  bool loop_radius_drift_scaled = true;
   // Radius candidates verified per search (nearest first, at least one submap apart); the best
   // inlier ratio wins. 1 = the fork's "first candidate only".
   int loop_max_candidates = 3;
@@ -134,6 +141,7 @@ struct LoopCandidateReport
   size_t target_id = 0;
   size_t source_id = 0;
   bool scan_context = false;  // false = radius search
+  bool coarse = false;        // registered coarse to fine (Scan Context, or a far radius one)
   double sc_dist = 0.0;       // only with scan_context
   bool converged = false;
   double fitness = 0.0;
@@ -183,6 +191,7 @@ private:
     M3D r_init;
     V3D t_init;
     bool scan_context;
+    bool coarse;  // run the coarse GICP stage first (the guess may be metres off)
     double sc_dist;
   };
 

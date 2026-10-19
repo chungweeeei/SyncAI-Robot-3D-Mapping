@@ -118,6 +118,7 @@ struct RunResult
 {
   int loops = 0;
   int scan_context_loops = 0;
+  int coarse_radius_loops = 0;   // accepted radius candidates beyond loop_search_radius
   double odom_end_error = 0.0;   // m, the drifted odometry at the last keyframe
   double graph_end_error = 0.0;  // m, the optimised pose at the last keyframe
   double graph_max_error = 0.0;  // m, over all keyframes
@@ -151,11 +152,13 @@ RunResult drive(const World & world, PoseGraphOptimizerConfig config, double yaw
     result.loops += static_cast<int>(pgo.pendingLoops().size());
     for (const LoopCandidateReport & c : pgo.lastCandidates()) {
       if (c.accepted && c.scan_context) result.scan_context_loops++;
+      if (c.accepted && !c.scan_context && c.coarse) result.coarse_radius_loops++;
       if (std::getenv("LOOP_DEBUG"))
         std::printf(
-          "  cand %zu->%zu sc=%d acc=%d gt_sep %.2f m gt_dyaw %.1f deg | sc %.3f ov %.2f in %.2f "
+          "  cand %zu->%zu sc=%d coarse=%d acc=%d gt_sep %.2f m gt_dyaw %.1f deg | sc %.3f ov %.2f "
+          "in %.2f "
           "fit %.4f xy %.3f corr %.2f/%.2f %s\n",
-          c.target_id, c.source_id, c.scan_context, c.accepted,
+          c.target_id, c.source_id, c.scan_context, c.coarse, c.accepted,
           std::hypot(gt[c.target_id].x - gt[c.source_id].x, gt[c.target_id].y - gt[c.source_id].y),
           (gt[c.source_id].yaw - gt[c.target_id].yaw) * 180.0 / M_PI, c.sc_dist, c.overlap_ratio,
           c.inlier_ratio, c.fitness, c.xy_info_ratio, c.correction_m, c.allowed_m, c.reject_reason);
@@ -184,8 +187,10 @@ const World & world()
 void print(const char * name, const RunResult & r)
 {
   std::printf(
-    "[%s] loops %d (scan context %d) | end error odom %.3f m graph %.3f m | max graph %.3f m\n",
-    name, r.loops, r.scan_context_loops, r.odom_end_error, r.graph_end_error, r.graph_max_error);
+    "[%s] loops %d (scan context %d, coarse radius %d) | end error odom %.3f m graph %.3f m | max "
+    "graph %.3f m\n",
+    name, r.loops, r.scan_context_loops, r.coarse_radius_loops, r.odom_end_error, r.graph_end_error,
+    r.graph_max_error);
 }
 }  // namespace
 
@@ -203,12 +208,14 @@ TEST(LoopClosure, RadiusSearchClosesSmallDrift)
 
 // ~2 m of drift at the revisit. On this path the radius search still closes
 // it where the second pass crosses the first, so it is switched off here
-// (a 1 cm radius never finds anything) to test Scan Context alone.
+// (a 1 cm radius, not drift-scaled, never finds anything) to test Scan
+// Context alone.
 TEST(LoopClosure, ScanContextClosesLargeDrift)
 {
   PoseGraphOptimizerConfig config;
   config.keyframe_delta_m = 0.5;
   config.loop_search_radius = 0.01;
+  config.loop_radius_drift_scaled = false;
   const RunResult without = drive(world(), config, 0.0006);
   print("large drift, radius only", without);
   EXPECT_EQ(without.loops, 0);
@@ -219,6 +226,27 @@ TEST(LoopClosure, ScanContextClosesLargeDrift)
   EXPECT_GT(with.scan_context_loops, 0);
   EXPECT_LT(with.graph_end_error, 0.5 * with.odom_end_error);
   EXPECT_LT(with.graph_max_error, with.odom_end_error);
+}
+
+// The same ~2 m of drift with Scan Context off and a 1 cm loop_search_radius:
+// only the drift-scaled reach can find the revisit, and the candidate is
+// metres from the estimate, so it must go through the coarse stage.
+TEST(LoopClosure, DriftScaledRadiusClosesLargeDrift)
+{
+  PoseGraphOptimizerConfig config;
+  config.keyframe_delta_m = 0.5;
+  config.loop_search_radius = 0.01;
+  config.loop_radius_drift_scaled = false;
+  const RunResult fixed = drive(world(), config, 0.0006);
+  print("large drift, fixed radius", fixed);
+  EXPECT_EQ(fixed.loops, 0);
+
+  config.loop_radius_drift_scaled = true;
+  const RunResult scaled = drive(world(), config, 0.0006);
+  print("large drift, drift-scaled radius", scaled);
+  EXPECT_GT(scaled.coarse_radius_loops, 0);
+  EXPECT_LT(scaled.graph_end_error, 0.5 * scaled.odom_end_error);
+  EXPECT_LT(scaled.graph_max_error, scaled.odom_end_error);
 }
 
 // The hall is 180-deg symmetric: Scan Context finds the far side as well, and

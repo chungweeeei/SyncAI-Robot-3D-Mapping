@@ -382,6 +382,8 @@ void PGONode::loadParameters()
     this->declare_parameter("loop_min_xy_info_ratio", m_pgo_config.loop_min_xy_info_ratio);
   m_pgo_config.loop_max_drift_ratio =
     this->declare_parameter("loop_max_drift_ratio", m_pgo_config.loop_max_drift_ratio);
+  m_pgo_config.loop_radius_drift_scaled =
+    this->declare_parameter("loop_radius_drift_scaled", m_pgo_config.loop_radius_drift_scaled);
   m_pgo_config.loop_max_candidates =
     this->declare_parameter("loop_max_candidates", m_pgo_config.loop_max_candidates);
   m_pgo_config.loop_sc_enabled =
@@ -393,12 +395,14 @@ void PGONode::loadParameters()
   RCLCPP_INFO(
     this->get_logger(),
     "[PGONode] loop gates: overlap >= %.2f, inlier ratio (< %.2f m) >= %.2f, xy info ratio >= "
-    "%.3f%s, correction <= %.1f %% of the path, up to %d radius candidates | robust kernel %s "
+    "%.3f%s, correction <= %.1f %% of the path, up to %d radius candidates (reach %s) | robust "
+    "kernel %s "
     "(scale %.1f) | scan context %s (range %.1f m, dist <= %.2f)",
     m_pgo_config.loop_min_overlap_ratio, m_pgo_config.loop_inlier_dist,
     m_pgo_config.loop_min_inlier_ratio, m_pgo_config.loop_min_xy_info_ratio,
     m_pgo_config.loop_min_xy_info_ratio > 0.0 ? "" : " (<= 0: off)",
     100.0 * m_pgo_config.loop_max_drift_ratio, m_pgo_config.loop_max_candidates,
+    m_pgo_config.loop_radius_drift_scaled ? "drift-scaled" : "loop_search_radius",
     m_pgo_config.loop_robust_kernel.c_str(), m_pgo_config.loop_robust_kernel_scale,
     m_pgo_config.loop_sc_enabled ? "on" : "off", m_pgo_config.loop_sc_max_range,
     m_pgo_config.loop_sc_dist_tresh);
@@ -642,8 +646,9 @@ void PGONode::timerCB()
       this->get_logger(),
       "[PGONode][loop] candidate %zu -> %zu via %s%s | overlap %.2f inlier %.2f fitness %.4f "
       "xy info %.3f correction %.2f / %.2f m | %s%s",
-      c.target_id, c.source_id, c.scan_context ? "scan context" : "radius", sc, c.overlap_ratio,
-      c.inlier_ratio, c.fitness, c.xy_info_ratio, c.correction_m, c.allowed_m,
+      c.target_id, c.source_id,
+      c.scan_context ? "scan context" : (c.coarse ? "radius (coarse)" : "radius"), sc,
+      c.overlap_ratio, c.inlier_ratio, c.fitness, c.xy_info_ratio, c.correction_m, c.allowed_m,
       c.accepted ? "passed" : "rejected: ", c.reject_reason);
   }
 

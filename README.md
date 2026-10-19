@@ -284,6 +284,7 @@ default silently.
 | `loop_min_overlap_ratio` / `loop_min_inlier_ratio` | `0.3` / `0.6` | overlap / source points, inliers / overlap points |
 | `loop_min_xy_info_ratio` | `0.0` | corridor degeneracy gate (GICP x / y information eigenvalue ratio); `<= 0` = off, still logged |
 | `loop_max_drift_ratio` | `0.05` | a loop may move the keyframe by at most this fraction of the path between its keyframes; `<= 0` = off |
+| `loop_radius_drift_scaled` | `true` | radius search reaches as far as the drift gate allows (capped at `loop_search_radius` + 3 × `loop_gicp_max_corr_dist`); `false` = `loop_search_radius` only |
 | `loop_max_candidates` | `3` | **int**, radius candidates verified per search |
 | `loop_sc_enabled` | `false` | Scan Context global candidates |
 | `loop_sc_max_range` / `loop_sc_dist_tresh` | `20.0` / `0.2` | m, descriptor radius / descriptor distance gate |
@@ -312,13 +313,18 @@ Every value is a double unless marked int or string (the `true` / `false` switch
 Each search (every keyframe, at most every `loop_search_period` after an accepted loop) collects
 candidates and GICP-registers the current keyframe onto an 11-keyframe submap around each:
 
-- **Radius candidates.** Past keyframes within `loop_search_radius` of the current estimate and at
-  least `loop_time_tresh` old, nearest first, up to `loop_max_candidates`, each more than a submap
-  apart. The one with the best inlier ratio wins.
+- **Radius candidates.** Past keyframes at least `loop_time_tresh` old, within
+  `loop_search_radius` of the current estimate in z, and in xy within what the drift gate would
+  accept for that pair: `max(loop_search_radius, loop_max_drift_ratio × path)`, capped at
+  `loop_search_radius` + 3 × `loop_gicp_max_corr_dist`, the coarse stage's reach
+  (`loop_radius_drift_scaled`). Nearest first, up to `loop_max_candidates`, each more than a
+  submap apart; the one with the best inlier ratio wins. One beyond `loop_search_radius` is
+  registered coarse to fine like a Scan Context one. A fixed 1 m radius never saw a revisit that
+  had drifted further, although the gate would have accepted it (5 m after 100 m).
 - **Scan Context** (`loop_sc_enabled`), only when no radius candidate passed. It compares
   gravity-levelled scan descriptors instead of positions, so it finds a revisit after more drift
-  than the radius. Its yaw estimate seeds a coarse GICP (3× voxel, 3× correspondence distance)
-  before the normal one.
+  than the radius search reaches. Its yaw estimate seeds a coarse GICP (3× voxel, 3×
+  correspondence distance) before the normal one.
 - **Gates.** Over the overlap only (source points with a submap point within the 1 m
   correspondence distance): overlap ratio, inlier ratio, mean squared distance; optionally the
   corridor degeneracy ratio. Then the **drift gate**: the correction must be at most

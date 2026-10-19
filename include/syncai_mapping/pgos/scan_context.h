@@ -6,7 +6,7 @@
 /**
  * Scan Context (Kim & Kim, IROS 2018): a pose-independent place descriptor, the global source of
  * loop candidates. Unlike the radius search it does not trust the current estimate, so it still
- * finds a revisit after drift beyond loop_search_radius.
+ * finds a revisit after drift beyond the radius search's reach.
  *
  * Descriptor: num_rings x num_sectors polar grid around the sensor holding each bin's highest
  * point (z + kHeightOffset; 0 = empty). The cloud must be gravity-levelled and sensor-centred: the
