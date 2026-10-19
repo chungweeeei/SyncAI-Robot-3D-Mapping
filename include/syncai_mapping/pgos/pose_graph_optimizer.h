@@ -29,6 +29,10 @@ struct KeyPoseWithCloud
   // Path length (m) from the first keyframe, along the LIO poses.
   double travelled;
   CloudType::Ptr body_cloud;
+  // body_cloud voxelised to pgo_node's map_cloud_resolution at insertion, for the live merge, so
+  // it never transforms and stacks the dense clouds. Body frame, so a loop never invalidates it.
+  // Null when that resolution is <= 0 (the merge then uses body_cloud).
+  CloudType::Ptr preview_cloud;
   // Only with loop_sc_enabled; built once at insertion from the LIO tilt.
   ScanContext::Descriptor sc_desc;
   Eigen::VectorXf sc_ring_key;

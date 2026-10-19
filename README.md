@@ -71,7 +71,9 @@ All under `/<robot_id>/pgo/` except the TF.
 | `reset_mapping` | `syncai_common/srv/ResetMapping` | discard the run and start over |
 
 Both map outputs are published only when someone subscribes, after a new keyframe, and at most
-every `map_cloud_pub_period` (3 s).
+every `map_cloud_pub_period` (3 s). They are a preview: each keyframe is voxelised to
+`map_cloud_resolution` once, at insertion, and the merge stacks those copies, re-voxelising every
+2 M points, so it never holds a second dense copy of the run.
 
 ### Map-cloud file hand-off
 
@@ -96,7 +98,7 @@ notice:
 
 | File | Content |
 |---|---|
-| `map.pcd` | all keyframes in their corrected global poses, binary, not voxel-filtered; later replaced by `clean_map`'s output |
+| `map.pcd` | all keyframes in their corrected global poses, binary, not voxel-filtered; later replaced by `clean_map`'s output. Streamed one keyframe at a time through `map.pcd.save.tmp` and renamed: the merge is never held in memory, and a failed save leaves the previous file whole |
 | `patches/<i>.pcd` | (with `save_patches`) one body-frame cloud per keyframe |
 | `poses.txt` | (with `save_patches`) `<i>.pcd tx ty tz qw qx qy qz` per keyframe |
 | `map_clean.recipe.json` | (with `save_patches` and `map_clean_enabled`) the cleaning status |
