@@ -338,6 +338,85 @@ objects sit *on* the octomap rather than over it:
   are sprites in the scene, depth-tested, because an HTML overlay draws in front of everything
   and reads as floating.
 
+## Second site run with the calibrated camera (2026-10-23, `dp1f_1022_with_image`)
+
+The same pipeline on the 2026-10-22 recording of the same site (1 194 s, 11 937 scans, 34 615
+images at 30 Hz), the first bag with the calibrated camera: `camera_info` carries the 2026-10-20
+**equidistant** intrinsics (110° × 60° on the raw stream; `docs/lidar-camera-calibration.md` in
+the Workspace) and `tf_static` the fitted extrinsic, where the 2026-10-16 bag had a plumb_bob fit
+of the stabilized stream and the tape-measured mount. Outputs: `map/dp1f_1022_with_image/semantic/`
+(same layout as before, plus `qa_overlay/` with the raw-scan overlays and four Swin-L test frames,
+and `replay/` with the replay recordings).
+
+Two things had to change in the tools first:
+
+- **Projection model.** `bagio.project` follows the bag's `distortion_model`: `cv2.fisheye` for
+  `equidistant`, as before for `plumb_bob`. Fed to the plumb_bob call, the four equidistant
+  coefficients read as `k1 k2 p1 p2` and bend every point near the border the wrong way. The
+  pre-projection cone is an off-axis angle derived from `K` and the image corners for the fisheye
+  (`view_cone`), because it sees ~61° off axis at the corners and the per-axis `|x/z| < 1.1`
+  (48°) cut off the outer third of the image. The raw-scan overlay (`overlay_test.py`, four
+  moments of the bag) agrees on the plant, the sofas, the shelf edge and the floor / wall line.
+- **Bag size.** 14 GB inflated (JPEG does not compress) on a disk with 16 GB free. The replay
+  reads an uncompressed view that `replay/feed_bag.sh` keeps one file ahead of the player and
+  one behind; the Python side reads an image-only bag (`extract_images.py`: the image nearest
+  each keyframe plus `camera_info` / `tf_static`, 1 942 of 34 615 images, 0.5 GB) through the
+  unchanged `ImageIndex`.
+
+| Step | Result |
+|---|---|
+| Replay | 1 941 keyframes, 46 loops, 14.9 M points; `clean_map` ok in 144 s (1.23 M points removed), `octomap.bt` 955 k occupied leaves |
+| Keyframe stamps | 1 941 = 1 941, worst consecutive relative-motion mismatch 2 mm |
+| 2D model | Mask2Former Swin-L ADE20K, 0.28 s / image on this Mac's MPS (M4 Pro); 1 941 images in 9.3 min |
+| Projection | 23 % of each patch's points in the frustum (16 % with the 77° lens); image \|dt\| mean 6.5 ms, max 30 ms |
+| Fusion | 1.82 M voxels, **46 % labelled** (58 % of the 1.22 M voxels left after masking with the cleaned `map.pcd`), mean vote purity 0.94 |
+
+Class shares of the labelled voxels, raw fusion: wall 31 %, floor 28 %, ceiling 25 %, windowpane
+2.8 %, shelf 2.5 %, column 1.5 %, door 1.1 %, light 1.0 %, armchair 0.8 %, sofa 0.7 %, person
+0.6 % (5 147 voxels; 520 in the masked map, the rest being the ghosts `clean_map` removes), then
+cabinet, chair, counter; `stairway` 2 068, `escalator` 713, and for the first time the thin
+classes `railing` (1 865), `bannister` (434) and `pole` (118).
+
+Object map by clustering (`objects.py` on the masked Swin-L map): 228 instances, 226 with usable
+views (649 crops embedded in 101 s) — light 35, shelf 29, armchair 26, door 24, chair 23, sofa 18,
+counter 10, cabinet 9, stairway 7, signboard 6, table 5. "green sofa" / "綠色沙發" rank the
+lounge armchairs and sofas, "plant" the two plants, "door" the doors; as on 10/18 the cosine
+values are close together (0.15–0.20) and the prompt-ensemble `p` is near 1 for every object of
+the right class, so the ranking, not the score, is the answer.
+
+Instance map with **SAM 3** (`instances.py --backend sam3 --stride 2 --min-obs 4`, the 10/18
+setting, 18 prompts): 971 images at 3.55 s / image on this Mac (10.9 s on the previous one), 58
+min of segmentation; 8 834 masks → 4 086 segments → 582 objects after the association → 436
+after `dedup` (118 overlap merges, 28 fragment merges) → **239 kept** with ≥ 4 observations:
+chair 69, sofa 28, door 25, bench 24, cabinet 20, shelf 18, table 16, signboard 12, counter 7,
+fire extinguisher 6, stairs 3, potted plant 2, armchair 2, vending machine 2, screen 2, escalator
+1, box 1, trash can 1 (`semantic/instances_sam3/`). Every query returns its own class first:
+"green sofa" / "綠色沙發" six sofas in the lounges, "fire extinguisher" five of the six
+extinguishers in its top six, "trash can" the one trash can, "stairs" the staircase and the
+escalator, "plant" the two potted plants. Against the 10/18 run on the first bag (189 → 104
+objects at the same setting), twice the keyframes and the wider lens give about twice the
+objects; `escalator` is one object, as it should be, and the 69 chairs are the dining area's,
+each seen from the walk down its aisles. The viewer (`semantic_octomap_viewer.html`, 13.9 MB)
+joins the fused voxels to the clean's `octomap.bt`: 61 % of its 986 k occupied cells carry a
+voxel class, and the 239 objects paint 44 k cells from their masks, 78 k after growing.
+
+What it says:
+
+- **Coverage is the lens.** Nothing in the model or the fusion changed, and the labelled share of
+  the voxels went from 31 % to 46 % (40 % → 58 % after masking) with the 110° fisheye in place of
+  the 77° lens, as predicted on 10/17 when coverage was named the limit before the model.
+- **The calibrated extrinsic shows in the thin classes.** Railings, bannisters and poles, which the
+  hand-measured mount smeared onto the wall or the floor behind them, now get their own voxels.
+- **The site has more loops than the first bag showed** (46 against 10): the 2026-10-22 walk
+  revisited the corridors, and the loop-closed `poses.txt` is what the per-keyframe labels are
+  composed with, so the semantic map inherits every correction for free.
+- **SAM 3 is the object layer's cost, not the map's.** 3.6 s / image is an hour for this bag at
+  stride 2 on a laptop GPU, against 9 min for the whole Swin-L stuff map; the 18-prompt list is
+  still the knob, and a site's list is shorter than that.
+- **The remaining gap in the save is still the keyframe stamp**: `poses.txt` has none, and the
+  replay-time recording of `lio_odom` + pgo's TF is what gives the labeller its image per
+  keyframe. A `stamps.txt` beside `poses.txt` would make the recording unnecessary.
+
 ## References
 
 - [gfchen01/semantic_mapping_with_360_camera_and_3d_lidar](https://github.com/gfchen01/semantic_mapping_with_360_camera_and_3d_lidar):

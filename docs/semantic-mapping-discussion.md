@@ -120,7 +120,14 @@ on MPS for 18 prompts, 5.4× Grounding DINO. Decision: SAM 3 is the instance bac
 - Send one object's goal pose to `navigate_to_goal` on the robot or in simulation and judge where
   it stops; not verifiable offline.
 - `stamps.txt` beside `poses.txt` in `save_maps`.
-- Camera extrinsic calibration (`direct_visual_lidar_calibration`) before judging thin objects.
-- The Workspace's `build/` disappeared mid-run on 2026-10-17 and `install/` is dangling symlinks;
-  the Workspace needs a rebuild (the replay used a scratch build of `syncai_common` and
-  `clean_map`).
+- ~~Camera extrinsic calibration before judging thin objects~~ — done 2026-10-20 (intrinsics
+  equidistant on the raw stream, extrinsic fitted; `docs/lidar-camera-calibration.md` in the
+  Workspace) and first used on `dp1f_1022_with_image` (semantic-mapping.md, "Second site run"):
+  coverage 31 % → 46 % of the voxels from the wider lens alone, thin classes appear.
+- `facebook/sam3` is gated: the machine running `instances.py --backend sam3` needs `hf auth login`
+  with an account that was granted access (the 2026-10-23 run was the first on this Mac).
+- A recording with the 30 Hz camera is ~14 GB inflated; the tools now read it one file at a time
+  (`replay/feed_bag.sh`, `extract_images.py`) instead of needing the whole bag on disk.
+- The Workspace's `build/` disappeared mid-run on 2026-10-17 and `install/` was dangling symlinks
+  (that replay used a scratch build of `syncai_common` and `clean_map`); rebuilt since, the
+  2026-10-23 replay ran on the workspace build.

@@ -203,6 +203,74 @@
 - 高度以機器人走過的地板為基準（關鍵幀 z − 光達高度）。在這個場地用局部最低點當地板是錯的：亮面地板會在下方 0.1–0.4 m 留下鏡面鬼影格，最低點取到的是鬼影，真正的地板就被當成可以成長進去的物體；
 - 標籤錨定在物體自己的某一格上（沙發外框的中心是空的），並改成場景中的 sprite、有深度測試，因為 HTML 疊層永遠畫在最前面，看起來像飄在空中。
 
+## 換上校正後相機的第二次場地跑（2026-10-23，`dp1f_1022_with_image`）
+
+同一條管線跑在同一場地 2026-10-22 的錄製上（1 194 s、11 937 幀掃描、30 Hz 共 34 615 張影像），
+這是第一包帶著校正後相機的 bag：`camera_info` 是 2026-10-20 的 **equidistant** 內參（原始串流上
+110° × 60°；見 Workspace 的 `docs/lidar-camera-calibration.md`），`tf_static` 是擬合出來的外參；
+2026-10-16 那包則是對穩像後串流做的 plumb_bob 擬合加上捲尺量的安裝位置。輸出在
+`map/dp1f_1022_with_image/semantic/`（版面同前，另加 `qa_overlay/` 放原始掃描的疊圖和四張 Swin-L
+測試影像，`replay/` 放重播時的紀錄）。
+
+工具端先改了兩件事：
+
+- **投影模型。** `bagio.project` 依 bag 的 `distortion_model` 選：`equidistant` 走 `cv2.fisheye`，
+  `plumb_bob` 維持原樣。四個 equidistant 係數若餵給 plumb_bob 的呼叫，會被當成 `k1 k2 p1 p2`，把靠近
+  邊緣的每個點都彎錯方向。投影前的視錐篩選對魚眼改用由 `K` 和影像四角算出的離軸角（`view_cone`），
+  因為它在角落看到約 61° 的離軸角，原本逐軸的 `|x/z| < 1.1`（48°）會把影像外側三分之一整個切掉。
+  原始掃描疊圖（`overlay_test.py`，bag 中四個時刻）在盆栽、沙發、書架邊緣和地板 / 牆交界上都吻合。
+- **Bag 大小。** 解壓後 14 GB（JPEG 壓不下去），磁碟只剩 16 GB。重播讀的是一個未壓縮的 view 目錄，
+  由 `replay/feed_bag.sh` 保持在 player 前面一檔解壓、後面一檔刪除；Python 端讀的是只含影像的小
+  bag（`extract_images.py`：每個 keyframe 最近的一張影像加上 `camera_info` / `tf_static`，34 615
+  張取 1 942 張，0.5 GB），`ImageIndex` 完全不用改。
+
+| 步驟 | 結果 |
+|---|---|
+| 重播 | 1 941 個 keyframe、46 個 loop、1 490 萬點；`clean_map` 144 s 完成（移除 123 萬點），`octomap.bt` 95.5 萬個占據葉節點 |
+| Keyframe 時間戳 | 1 941 = 1 941，相鄰相對運動最大誤差 2 mm |
+| 2D 模型 | Mask2Former Swin-L ADE20K，這台 Mac（M4 Pro）的 MPS 上 0.28 s / 張；1 941 張 9.3 分鐘 |
+| 投影 | 每個 patch 有 23 % 的點落在視錐內（77° 鏡頭時 16 %）；影像 \|dt\| 平均 6.5 ms，最大 30 ms |
+| 融合 | 182 萬 voxel，**46 % 有標籤**（用清理後的 `map.pcd` 遮罩後剩 122 萬 voxel，其中 58 %），平均投票純度 0.94 |
+
+有標籤 voxel 的類別占比（raw 融合）：wall 31 %、floor 28 %、ceiling 25 %、windowpane 2.8 %、shelf
+2.5 %、column 1.5 %、door 1.1 %、light 1.0 %、armchair 0.8 %、sofa 0.7 %、person 0.6 %（5 147 個
+voxel；遮罩版只剩 520 個，其餘是 `clean_map` 清掉的鬼影），再來是 cabinet、chair、counter；
+`stairway` 2 068、`escalator` 713，而且第一次出現細長類別 `railing`（1 865）、`bannister`（434）、
+`pole`（118）。
+
+聚類物體地圖（`objects.py` 跑在遮罩後的 Swin-L 地圖上）：228 個 instance，226 個有可用視角（649
+張裁圖 101 s 內嵌入完成）—— light 35、shelf 29、armchair 26、door 24、chair 23、sofa 18、counter 10、
+cabinet 9、stairway 7、signboard 6、table 5。「green sofa」/「綠色沙發」排出休息區的扶手椅和沙發，
+「plant」排出兩盆植物，「door」排出門；和 10/18 一樣，cosine 值彼此很接近（0.15–0.20），prompt
+ensemble 的 `p` 對每個同類物體都接近 1，所以答案是排名而不是分數。
+
+**SAM 3** instance 地圖（`instances.py --backend sam3 --stride 2 --min-obs 4`，10/18 的設定，
+18 個提示詞）：971 張影像在這台 Mac 上每張 3.55 s（上一台 10.9 s），分割共 58 分鐘；8 834 個
+mask → 4 086 個 segment → 關聯後 582 個物體 → `dedup` 後 436 個（118 次重疊合併、28 次碎片合併）→
+觀測次數 ≥ 4 的 **239 個保留**：chair 69、sofa 28、door 25、bench 24、cabinet 20、shelf 18、table
+16、signboard 12、counter 7、fire extinguisher 6、stairs 3、potted plant 2、armchair 2、vending
+machine 2、screen 2、escalator 1、box 1、trash can 1（`semantic/instances_sam3/`）。每個查詢都先回
+自己的類別：「green sofa」/「綠色沙發」是休息區的六張沙發，「fire extinguisher」前六名裡有五個是六個
+滅火器之一，「trash can」是唯一的垃圾桶，「stairs」是樓梯和手扶梯，「plant」是兩盆盆栽。和 10/18 在第
+一包 bag 上的結果（同設定 189 → 104 個物體）相比，兩倍的 keyframe 加上較廣的鏡頭給了約兩倍的物體；
+`escalator` 只有一個物體，本該如此，69 張 chair 是用餐區的椅子，每張都在走過走道時被看到。viewer
+（`semantic_octomap_viewer.html`，13.9 MB）把融合後的 voxel 接到 clean 的 `octomap.bt` 上：98.6 萬個
+占據格子裡 61 % 帶有 voxel 類別，239 個物體從 mask 塗了 4.4 萬格，區域生長後 7.8 萬格。
+
+這些數字說明的事：
+
+- **覆蓋率由鏡頭決定。** 模型和融合都沒改，有標籤的 voxel 從 31 % 升到 46 %（遮罩後 40 % → 58 %），
+  只因為 77° 鏡頭換成 110° 魚眼，正如 10/17 把覆蓋率列為比模型更先的限制時所預期。
+- **校正後的外參反映在細長類別上。** 欄杆、扶手、立柱原本被手量的安裝位置抹到後面的牆或地板上，
+  現在有自己的 voxel。
+- **這個場地的 loop 比第一包 bag 多**（46 對 10）：2026-10-22 的行走重複經過走廊，而每個 keyframe 的
+  標籤是用 loop 修正後的 `poses.txt` 合成的，所以語意地圖免費繼承了每一次修正。
+- **SAM 3 是物體層的成本，不是地圖的。** 每張 3.6 s，在筆電 GPU 上 stride 2 跑這包 bag 要一小時，
+  而整張 Swin-L 的 stuff 地圖只要 9 分鐘；18 個提示詞的清單仍是調整速度的旋鈕，而一個場地的清單會
+  比這短。
+- **存檔還缺的仍是 keyframe 時間戳**：`poses.txt` 沒有時間戳，標記器要靠重播時錄下的 `lio_odom`
+  和 pgo 的 TF 才知道每個 keyframe 對應哪張影像。在 `poses.txt` 旁多一個 `stamps.txt` 就不需要錄了。
+
 ## 參考資料
 
 - [gfchen01/semantic_mapping_with_360_camera_and_3d_lidar](https://github.com/gfchen01/semantic_mapping_with_360_camera_and_3d_lidar)：ROS 2 node，影像 + 3D LiDAR + 里程計，Grounded-SAM-2，物體層級地圖，附範例 bag。最接近的現有系統。

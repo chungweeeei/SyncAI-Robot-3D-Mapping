@@ -64,5 +64,12 @@
 - 從 `map_semantic_clean.pcd` 產生 keepout mask（第 2 節第 1 項），並在這張地圖的玻璃帷幕和手扶梯上檢查。
 - 把某個物體的目標 pose 送給機器人或模擬環境的 `navigate_to_goal`，看停的位置是否合理；離線無法驗證。
 - `save_maps` 在 `poses.txt` 旁輸出 `stamps.txt`。
-- 評估細小物體前先做相機外參校正（`direct_visual_lidar_calibration`）。
-- Workspace 的 `build/` 在 2026-10-17 執行中途消失，`install/` 變成懸空的 symlink；Workspace 需要重建（重播時用的是 `syncai_common` 和 `clean_map` 的暫存建置）。
+- ~~評估細小物體前先做相機外參校正~~ —— 2026-10-20 已完成（內參改為原始串流上的 equidistant，
+  外參擬合；見 Workspace 的 `docs/lidar-camera-calibration.md`），並首次用在 `dp1f_1022_with_image`
+  （semantic-mapping.md「第二次場地跑」）：光靠較廣的鏡頭，覆蓋率就從 31 % 升到 46 %，細長類別出現了。
+- `facebook/sam3` 是 gated model：跑 `instances.py --backend sam3` 的機器要先用取得存取權的帳號
+  `hf auth login`（2026-10-23 是這台 Mac 的第一次）。
+- 帶 30 Hz 相機的錄製解壓後約 14 GB；工具現在一次只讀一個檔（`replay/feed_bag.sh`、
+  `extract_images.py`），不需要整包 bag 都在磁碟上。
+- Workspace 的 `build/` 在 2026-10-17 執行中途消失，`install/` 當時是懸空的 symlink（那次重播用的是
+  `syncai_common` 和 `clean_map` 的暫存建置）；之後已重建，2026-10-23 的重播跑在 workspace 的建置上。
