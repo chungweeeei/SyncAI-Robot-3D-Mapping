@@ -12,11 +12,14 @@ bag = Path(sys.argv[1])
 out = Path(sys.argv[2])
 out.mkdir(exist_ok=True)
 idx = ImageIndex(bag)
-imgs = {j: img for j, _, img in idx.read_many([900, 2700, 4500, 6000])}
+want = [900, 2700, 4500, 6000]
+if max(want) >= len(idx.stamps):  # a shorter bag (or one file of a split one): four spread-out images
+    want = [int(len(idx.stamps) * f) for f in (0.12, 0.37, 0.62, 0.87)]
+imgs = {j: img for j, _, img in idx.read_many(want)}
 for model in sys.argv[3:]:
     seg = make_segmenter(model)
     tag = model_tag(model)
-    seg(imgs[900])  # warm-up
+    seg(imgs[want[0]])  # warm-up
     t = time.time()
     for j, img in imgs.items():
         lab, conf, bnd = seg(img)

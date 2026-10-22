@@ -33,7 +33,7 @@ import open3d as o3d
 from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation as R
 
-from bagio import ImageIndex, body_to_camera, project, read_static
+from bagio import ImageIndex, body_to_camera, project, read_static, view_cone
 from instance_seg import make_instance_segmenter
 from keyframes import load_poses_txt
 from label_patches import OdomInterp, load_keyframes
@@ -92,12 +92,7 @@ def segment_frames(a, map_dir, names, kt, kq, kfs, cam, T_cam_body, odom, idx, k
         R_im, t_im = odom.pose(stamp)
         pc = T_cam_body.apply(R_im.inv().apply(R_kf.apply(body) + t_kf - t_im))
         z = pc[:, 2]
-        cone = (
-            (z > 0.3)
-            & (z < a.max_range)
-            & (np.abs(pc[:, 0] / np.maximum(z, 1e-6)) < 1.1)
-            & (np.abs(pc[:, 1] / np.maximum(z, 1e-6)) < 0.8)
-        )
+        cone = view_cone(cam, pc) & (z > 0.3) & (z < a.max_range)
         ci = np.nonzero(cone)[0]
         uv = project(cam, pc[ci])
         ins = (uv[:, 0] >= 0) & (uv[:, 0] < W) & (uv[:, 1] >= 0) & (uv[:, 1] < H)

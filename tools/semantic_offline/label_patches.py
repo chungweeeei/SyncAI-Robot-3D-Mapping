@@ -16,7 +16,7 @@ import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation as R, Slerp
 
-from bagio import ImageIndex, body_to_camera, project, read_static
+from bagio import ImageIndex, body_to_camera, project, read_static, view_cone
 from pcdio import read_xyz
 from segment import UNLABELED, make_segmenter
 
@@ -128,11 +128,7 @@ def main():
             labels = np.full(len(xyz), UNLABELED, np.uint8)
             weights = np.zeros(len(xyz), np.float32)
             z = p_cam[:, 2]
-            cone = (
-                (z > 0.2)
-                & (np.abs(p_cam[:, 0] / np.maximum(z, 1e-6)) < 1.1)
-                & (np.abs(p_cam[:, 1] / np.maximum(z, 1e-6)) < 0.8)
-            )
+            cone = view_cone(cam, p_cam)
             ci = np.nonzero(cone)[0]
             if len(ci):
                 uv = project(cam, p_cam[ci])

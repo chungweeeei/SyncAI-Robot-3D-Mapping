@@ -31,7 +31,7 @@ import open3d as o3d
 from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation as R
 
-from bagio import ImageIndex, body_to_camera, project, read_static
+from bagio import ImageIndex, body_to_camera, project, read_static, view_cone
 from keyframes import load_poses_txt
 from label_patches import OdomInterp, load_keyframes
 from pcdio import read_labeled, read_xyz
@@ -260,11 +260,7 @@ def main():
         for k in cands:
             pc = to_cam(pts, k)
             z = pc[:, 2]
-            cone = (
-                (z > 0.4)
-                & (np.abs(pc[:, 0] / np.maximum(z, 1e-6)) < 1.1)
-                & (np.abs(pc[:, 1] / np.maximum(z, 1e-6)) < 0.8)
-            )
+            cone = view_cone(cam, pc) & (z > 0.4)
             if cone.sum() < max(10, 0.3 * len(pts)):
                 continue
             uv = project(cam, pc[cone])

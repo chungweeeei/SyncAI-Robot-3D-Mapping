@@ -50,8 +50,9 @@ class Camera:
     width: int
     height: int
     K: np.ndarray  # 3x3
-    D: np.ndarray  # plumb_bob k1 k2 p1 p2 k3
+    D: np.ndarray  # plumb_bob k1 k2 p1 p2 k3, or equidistant k1 k2 k3 k4
     frame_id: str
+    distortion_model: str = "plumb_bob"
 
 
 @dataclass
@@ -92,6 +93,7 @@ def read_static(bag_dir: Path) -> tuple[Camera, dict[tuple[str, str], Transform]
                     np.array(msg.k).reshape(3, 3),
                     np.array(msg.d),
                     msg.header.frame_id,
+                    str(getattr(msg, "distortion_model", "") or "plumb_bob"),
                 )
             elif conn.topic == TF_STATIC_TOPIC:
                 for t in msg.transforms:
@@ -191,6 +193,38 @@ def iter_scans(bag_dir: Path, start_ns: int | None = None, stop_ns: int | None =
 
 
 def project(cam: Camera, p_cam: np.ndarray):
-    """Pixel coordinates (N,2) of camera-frame points through K and the plumb_bob distortion."""
-    uv, _ = cv2.projectPoints(p_cam.reshape(-1, 1, 3), np.zeros(3), np.zeros(3), cam.K, cam.D)
+    """Pixel coordinates (N,2) of camera-frame points through K and the camera_info's distortion
+    model: plumb_bob (cv2.projectPoints) or equidistant (cv2.fisheye.projectPoints). robot01's
+    camera0.yaml is equidistant since its 2026-10-20 calibration (110 x 60 deg on the raw
+    stream; the 2026-10-16 bags carried a plumb_bob fit of the stabilized output), and a
+    4-coefficient equidistant D fed to projectPoints would be read as k1 k2 p1 p2 and bend
+    every point near the border the wrong way."""
+    pts = p_cam.reshape(-1, 1, 3).astype(np.float64)
+    if cam.distortion_model == "equidistant":
+        uv, _ = cv2.fisheye.projectPoints(
+            pts, np.zeros(3), np.zeros(3), cam.K, cam.D.reshape(-1, 1)[:4]
+        )
+    else:
+        uv, _ = cv2.projectPoints(pts, np.zeros(3), np.zeros(3), cam.K, cam.D)
     return uv.reshape(-1, 2)
+
+
+def view_cone(cam: Camera, p_cam: np.ndarray) -> np.ndarray:
+    """Mask of the camera-frame points that can land in the image, taken before the (slower)
+    projection: in front of the camera and inside the lens's field of view with a margin.
+    plumb_bob keeps the per-axis cone the 77 x 44 deg camera was labelled with (the 2026-10-16/17
+    runs); equidistant bounds the off-axis angle instead, because a 110 x 60 deg fisheye sees
+    ~61 deg off axis at the image corners (r = f * theta, 760 px / 710 px), which |x/z| < 1.1
+    (48 deg) cut off together with everything the outer third of the image shows."""
+    z = p_cam[:, 2]
+    front = z > 0.2
+    if cam.distortion_model == "equidistant":
+        corners = np.array(
+            [[0, 0], [cam.width, 0], [0, cam.height], [cam.width, cam.height]], np.float64
+        )
+        r_max = np.max(np.hypot(corners[:, 0] - cam.K[0, 2], corners[:, 1] - cam.K[1, 2]))
+        theta_max = min(1.15 * r_max / min(cam.K[0, 0], cam.K[1, 1]), 1.4)
+        theta = np.arctan2(np.hypot(p_cam[:, 0], p_cam[:, 1]), z)
+        return front & (theta < theta_max)
+    zz = np.maximum(z, 1e-6)
+    return front & (np.abs(p_cam[:, 0] / zz) < 1.1) & (np.abs(p_cam[:, 1] / zz) < 0.8)

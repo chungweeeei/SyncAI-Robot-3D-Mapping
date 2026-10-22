@@ -9,6 +9,7 @@ and "2D backend comparison".
 bag ──replay/replay.sh (robot image)──▶ map/<name>/{patches,poses.txt}  +  replay/{lio_odom,tf_map_odom}.txt
                                                    │
 keyframes.py      stamps per keyframe (poses.txt has none): re-run isKeyPose over the pairs pgo processed
+extract_images.py (compressed bag only) the image nearest each keyframe + camera_info + tf_static → a small bag
 label_patches.py  nearest image → 2D backend → pose-interpolated projection → <run>/labels/<i>.npz
 fuse.py           patches × poses.txt → 0.1 m voxels → weighted class histogram → argmax → map_semantic.{pcd,ply}
 render.py         top-down rasters + legend per run
@@ -28,11 +29,19 @@ compare.py        runs side by side: coarse taxonomy, geometry-based rates, agre
      -e CYCLONEDDS_URI=/home/syncrobotic/robot_ws/config/cyclonedds.xml \
      syncai-robot-base bash /scratch/replay.sh
    ```
-   `replay.sh` expects the bag at `record/dp1f_with_image_db3` — an uncompressed view: `zstd -d`
-   each `.db3.zstd` into that directory and copy `metadata.yaml` with `compression_format: ""`,
-   `compression_mode: ""` and the `.db3` names, so play does not inflate the files into the
-   container — and writes to `map/dp1f_with_image`; edit the two paths for another bag. It plays
-   in real time (~13 min for this bag), then saves and waits for `clean_map`.
+   `replay.sh [<bag> [<map dir>]]` (container paths; defaults `record/dp1f_with_image_db3` →
+   `map/dp1f_with_image`) plays in real time, saves with patches, waits for `clean_map` and runs
+   `clean_map --octomap 1` when the save left no `octomap.bt`. The bag must be an **uncompressed
+   view**: a directory with the recording's `metadata.yaml` rewritten to `compression_format: ""`,
+   `compression_mode: ""` and `.db3` names, so play never inflates into the container. For a
+   recording too large to inflate whole (`dp1f_1022_with_image`: 7 × 2 GB on a disk with 16 GB
+   free) build the view in the scratch directory with files 0 and 1 inflated, then keep it fed
+   from the host while the container runs:
+   ```
+   replay/feed_bag.sh <container> <view dir> <recording dir> <bag base name>
+   ```
+   It reads which `.db3` the player holds open off the container's `/proc/*/fd`, inflates the
+   next file (~2 s) and deletes the previous one, so at most two files exist at a time.
 2. **Label, fuse and compare**, on the host:
    ```
    uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -r requirements.txt
@@ -43,8 +52,26 @@ compare.py        runs side by side: coarse taxonomy, geometry-based rates, agre
    `:N` labels every N-th keyframe. `bagio.py` finds the Livox `.msg` files in the Workspace
    checkout this package sits in (`LIVOX_MSG_DIR` overrides).
 
+   `<bag dir>` is read by `rosbags`, which inflates every file of a zstd file-compressed
+   recording at open. For such a recording make the image-only bag first and pass that instead:
+   ```
+   .venv/bin/python extract_images.py <recording dir> <image bag dir> --keyframes <out root>/keyframes.txt
+   ```
+   One file at a time (inflate, read, delete), it keeps the image nearest each keyframe stamp
+   plus `camera_info` and `tf_static`, with the original stamps and receive times, so
+   `ImageIndex` and `read_static` see what they would see in the full bag (0.5 GB for 2 000
+   keyframes instead of 14 GB). `--every-s N` keeps one image every N seconds on top.
+
 `overlay_test.py <bag> <out> [seconds...]` projects raw scans onto images: run it first on any new
 extrinsic. `seg_test.py <bag> <out> <model>...` times and overlays any backend on four bag images.
+
+The projection follows the bag's `camera_info`: `plumb_bob` through `cv2.projectPoints`,
+`equidistant` (robot01's `camera0.yaml` since the 2026-10-20 calibration, 110° × 60° on the raw
+stream) through `cv2.fisheye.projectPoints` — a 4-coefficient equidistant `D` fed to the plumb_bob
+call reads as `k1 k2 p1 p2` and bends every point near the border the wrong way. The pre-projection
+cone (`bagio.view_cone`) is per axis for plumb_bob (the values the 2026-10-16/17 runs used) and an
+off-axis angle derived from `K` and the image corners for equidistant, because the fisheye sees
+~61° off axis at the corners and `|x/z| < 1.1` (48°) would drop the outer third of the image.
 
 ## 2D backends (`segment.py`, `make_segmenter(name)`)
 
@@ -137,7 +164,10 @@ reproduces `map.pcd` exactly from `patches/`).
 
 ## Known limits
 
-- The camera extrinsic is the URDF's hand-measured one; calibrate before trusting thin objects.
+- Bags before 2026-10-20 carry the URDF's hand-measured extrinsic and a plumb_bob fit of the
+  stabilized stream; `dp1f_1022_with_image` and later carry the calibrated equidistant intrinsics
+  and the fitted extrinsic (`docs/lidar-camera-calibration.md` in the Workspace). Check the
+  overlay on any new bag either way.
 - Only the forward frustum gets labels (~16 % of each patch); the rest is grey.
 - `person` voxels are ghosts from the raw patches; `clean_map` removes them from `map.pcd`, the
   masked variant inherits that, the raw fusion does not.
