@@ -147,8 +147,9 @@ public:
 
   // ---- The post-save map cleaning --------------------------------------------
   // Spawn `clean_map <map_dir>` detached, after the save has ended the run. Returns the sentence
-  // appended to the save's message ("" when disabled). Never fails the save.
-  std::string startMapClean(const std::filesystem::path & map_dir, bool have_patches);
+  // appended to the save's message ("" when disabled). Never fails the save. `octomap` is this
+  // save's choice (SaveMaps' octomap, its DEFAULT already resolved to map_clean_octomap).
+  std::string startMapClean(const std::filesystem::path & map_dir, bool have_patches, bool octomap);
   // Record a clean that could not start in the sidecar; returns the sentence.
   std::string failMapClean(
     const std::filesystem::path & map_dir, const std::string & started_at,

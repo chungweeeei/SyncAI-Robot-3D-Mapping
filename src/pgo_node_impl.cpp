@@ -1022,6 +1022,16 @@ void PGONode::saveMapsCB(
     return;
   }
 
+  // Refused before anything is written, so a caller built against a newer interface cannot end
+  // the run on a value this node does not know.
+  using syncai_common::srv::SaveMaps;
+  if (request->octomap > SaveMaps::Request::OCTOMAP_OFF) {
+    response->success = false;
+    response->message =
+      "Unknown 3D map choice " + std::to_string(request->octomap) + "; nothing was saved.";
+    return;
+  }
+
   if (!std::filesystem::exists(request->file_path)) {
     response->success = false;
     response->message = request->file_path + " IS NOT EXISTS!";
@@ -1097,7 +1107,10 @@ void PGONode::saveMapsCB(
   // After the run has ended, so the keyframes' RAM is back before the clean starts; a clean that
   // cannot start is reported in the message and the sidecar, never as a failed save. The message
   // is UI copy, rendered verbatim by the console.
-  const std::string clean_note = startMapClean(p_dir, request->save_patches);
+  const bool octomap = request->octomap == SaveMaps::Request::OCTOMAP_DEFAULT
+                         ? m_node_config.map_clean.octomap
+                         : request->octomap == SaveMaps::Request::OCTOMAP_ON;
+  const std::string clean_note = startMapClean(p_dir, request->save_patches, octomap);
   response->message = "Map saved (" + std::to_string(saved) +
                       " keyframes). Mapping stopped — start it again for another map." + clean_note;
   RCLCPP_WARN(
@@ -1116,9 +1129,14 @@ void PGONode::saveMapsCB(
 //   - One entry point: the same executable is the by-hand re-clean.
 // posix_spawn, not fork(): a fork()ed multithreaded process may only call async-signal-safe
 // functions before exec.
-std::string PGONode::startMapClean(const std::filesystem::path & map_dir, bool have_patches)
+std::string PGONode::startMapClean(
+  const std::filesystem::path & map_dir, bool have_patches, bool octomap)
 {
-  if (!m_node_config.map_clean_enabled) return "";
+  // The 3D map is built only by the clean, so a choice the clean cannot honour is said aloud:
+  // without a sidecar the backend reads a requested 3D map as never asked for.
+  if (!m_node_config.map_clean_enabled) {
+    return octomap ? " The 3D map was not built: this robot is set up not to clean its maps." : "";
+  }
   // UI copy, appended to the save's message.
   if (!have_patches) {
     RCLCPP_INFO(
@@ -1128,7 +1146,10 @@ std::string PGONode::startMapClean(const std::filesystem::path & map_dir, bool h
     return " People were not removed from this map: that needs the per-scan data this save "
            "did not keep.";
   }
-  const auto & oc = m_node_config.map_clean;
+  // A copy with this save's 3D map choice: the sidecar's params.octomap is what the backend reads
+  // to say whether a 3D map is being built, so it and --octomap must come from the same value.
+  auto oc = m_node_config.map_clean;
+  oc.octomap = octomap;
   const std::string started_at = dynamic_removal::recipe::isoUtcNow();
   // Before the spawn: the sidecar must say "converting" by the time the backend reads it.
   try {
