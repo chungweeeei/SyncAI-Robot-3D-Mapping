@@ -101,6 +101,7 @@
     # Cut rays below the floor so reflections off a glossy floor count no misses.
     map_clean_clip_below_floor: true
     # Also write octomap.bt for octomap_planner's 3D paths. Most of the memory when on.
+    # Only the default: a save_maps call that sets octomap ON or OFF decides for itself.
     map_clean_octomap: false
     # Close enclosed floor gaps in octomap.bt (only) within this of the path, m.
     # <= 0 = off.

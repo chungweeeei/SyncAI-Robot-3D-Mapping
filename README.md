@@ -11,8 +11,8 @@ It has two executables:
   and serves `start_mapping`, `save_maps` and `reset_mapping`. It runs only in the mapping
   session; in navigation `syncai_localizer` owns the same TF.
 - **`clean_map`**: a detached job `pgo_node` starts after each save. It rewrites the saved
-  `map.pcd` without people and one-off returns, and with `map_clean_octomap` (off by default)
-  writes `octomap.bt`, the occupancy tree `octomap_planner` plans 3D global paths on.
+  `map.pcd` without people and one-off returns, and, when the save asks for it (`octomap`, else
+  `map_clean_octomap`, off by default), writes `octomap.bt`, the occupancy tree `octomap_planner` plans 3D global paths on.
 
 ```
    syncai_pointlio            /<id>/pointlio/{body_cloud_dense, lio_odom}
@@ -94,7 +94,10 @@ notice:
 
 ### `save_maps`
 
-`file_path` must be an existing directory. The node writes:
+`file_path` must be an existing directory. `octomap` decides whether this save's clean also
+builds `octomap.bt`: `OCTOMAP_ON` / `OCTOMAP_OFF`, or `OCTOMAP_DEFAULT` (0, what a caller that
+sets nothing sends) for `map_clean_octomap`. Any other value is refused before anything is
+written. The choice is recorded as the sidecar's `params.octomap`. The node writes:
 
 | File | Content |
 |---|---|
@@ -361,7 +364,7 @@ Without a backend:
 ```bash
 ros2 service call /<robot_id>/pgo/start_mapping syncai_common/srv/StartMapping "{reset_lio: true}"   # robot still
 ros2 service call /<robot_id>/pgo/save_maps syncai_common/srv/SaveMaps \
-  "{file_path: '/home/syncrobotic/robot_ws/map/<name>', save_patches: true}"   # directory must exist
+  "{file_path: '/home/syncrobotic/robot_ws/map/<name>', save_patches: true, octomap: 1}"   # directory must exist; 1 = build the 3D map
 ros2 service call /<robot_id>/pgo/reset_mapping syncai_common/srv/ResetMapping "{reset_lio: true}"   # robot still
 ```
 
