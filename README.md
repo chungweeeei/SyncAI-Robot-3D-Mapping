@@ -173,6 +173,14 @@ many **passed through** it (M), and rewrites `map.pcd` without two classes of po
 `converting` with the raw map. **A 2D map made while it says `converting` came from the raw map**;
 redo it once it reads `ok`.
 
+While it runs, `converting` also carries `"progress": {"stage": "misses", "fraction": 0.42}`,
+rewritten at most once a second: `fraction` is how much of the whole clean is done (0 to 1, never
+1 — `ok` says done), which is what the console's bar is drawn from; `stage` is `hits`, `misses`,
+`tree`, `map` or `write`, for a person reading the file. There is none before the clean has the
+host's lock, so a queued clean reads as `converting` with no progress. The stages' shares of the
+time are `overallFraction` in `recipe.cpp`, timed on one 3026-keyframe site (the `misses` pass is
+about 70 % of it).
+
 Run by hand to re-clean any save with `patches/` + `poses.txt`; with `--octomap 1` this is also
 how to convert one to `octomap.bt` offline. It rewrites `map.pcd` too, identically for the same
 params (it re-cleans from the raw patches). A bare `map.pcd` cannot be converted: without scan

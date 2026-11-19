@@ -550,6 +550,7 @@ bool cleanImpl(
   // planner would find holes everywhere.
   //
   // Freed before pass 3 so the tree and the map cloud never coexist.
+  if (building && progress && !progress("tree", 0, 0)) return false;
   if (building) {
     try {
       const float free_log = tree.getClampingThresMinLog();
@@ -621,6 +622,7 @@ bool cleanImpl(
   }
   out.map_points_kept = map.size();
   if (map.empty()) throw std::runtime_error("cleaned map.pcd would be empty");
+  if (progress && !progress("write", 0, 0)) return false;
   savePcd(tmpPath(dir, kMapFile), map);
 
   // A newer save replaced poses.txt: don't rename the OLD save's outputs over it.

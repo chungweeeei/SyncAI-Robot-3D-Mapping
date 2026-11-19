@@ -164,6 +164,8 @@ if(BUILD_TESTING)
   target_link_libraries(test_map_writer pgos)
   ament_add_gtest(test_octomap_edits test/test_octomap_edits.cpp)
   target_link_libraries(test_octomap_edits dynamic_removal_edits)
+  ament_add_gtest(test_recipe test/test_recipe.cpp)
+  target_link_libraries(test_recipe dynamic_removal_recipe nlohmann_json::nlohmann_json)
 endif()
 
 ament_package()
