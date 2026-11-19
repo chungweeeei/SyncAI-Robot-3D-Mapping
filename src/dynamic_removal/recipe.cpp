@@ -2,6 +2,8 @@
 
 #include <unistd.h>
 
+#include <algorithm>
+#include <cmath>
 #include <ctime>
 #include <fstream>
 #include <stdexcept>
@@ -65,9 +67,49 @@ std::string isoUtcNow()
   return buf;
 }
 
+double overallFraction(const std::string & stage, size_t done, size_t total)
+{
+  // Each stage's share of the clean's time, in the order clean() runs them.
+  // Timed on one site (3026 keyframes, with the tree, 308 s on a dev
+  // machine: hits 3 s, misses 220 s, tree 11 s, map 74 s, write 1 s). The
+  // misses pass ray-casts every scan and feeds the tree, which is why it is
+  // most of it; without the tree it is a smaller share and the bar only
+  // runs unevenly, never back.
+  struct Share
+  {
+    const char * stage;
+    double weight;
+  };
+  static constexpr Share kShares[] = {
+    {"hits", 0.01}, {"misses", 0.71}, {"tree", 0.04}, {"map", 0.23}, {"write", 0.01}};
+  double before = 0.0;
+  for (const Share & s : kShares) {
+    if (stage == s.stage) {
+      // A stage with nothing to count (total 0) stands at its start.
+      const double within =
+        total == 0 ? 0.0 : static_cast<double>(std::min(done, total)) / static_cast<double>(total);
+      return before + s.weight * within;
+    }
+    before += s.weight;
+  }
+  return -1.0;
+}
+
 std::string converting(const Params & params, const std::string & started_at)
 {
   Json j = head("converting", started_at);
+  j["params"] = paramsJson(params);
+  return dump(j);
+}
+
+std::string converting(
+  const Params & params, const std::string & started_at, const std::string & stage, double fraction)
+{
+  Json j = head("converting", started_at);
+  Json & pj = j["progress"];
+  pj["stage"] = stage;
+  // Three places: a percent is all that is read of it.
+  pj["fraction"] = std::round(std::clamp(fraction, 0.0, 1.0) * 1000.0) / 1000.0;
   j["params"] = paramsJson(params);
   return dump(j);
 }
