@@ -20,6 +20,7 @@
 
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
@@ -241,13 +242,38 @@ int main(int argc, char ** argv)
             << " m (max range " << params.max_range << " m)" << std::endl;
   dr::Measurements m;
   int rc = 0;
+  // The sidecar is all a console can read of a detached clean, so how far it
+  // is goes there. On a new stage at once (the two with nothing to count are
+  // one call each), else once a second: every mark is a file and a rename.
+  std::string marked_stage;
+  auto marked_at = std::chrono::steady_clock::time_point{};
+  auto markProgress = [&](const char * stage, size_t done, size_t total) {
+    const auto now = std::chrono::steady_clock::now();
+    if (stage == marked_stage && now - marked_at < std::chrono::seconds(1)) return;
+    const double fraction = recipe::overallFraction(stage, done, total);
+    if (fraction < 0.0) return;
+    marked_stage = stage;
+    marked_at = now;
+    try {
+      recipe::writeAtomic(dir, recipe::converting(params, started_at, stage, fraction));
+    } catch (const std::exception & e) {
+      // A mark that did not land costs the bar a step, never the clean.
+      std::cerr << "[clean_map] " << e.what() << "\n";
+    }
+  };
   try {
-    const bool done = dr::clean(dir, params, m, [](const char * stage, size_t done, size_t total) {
-      if (done % 100 == 0) {
+    const bool done = dr::clean(dir, params, m, [&](const char * stage, size_t done, size_t total) {
+      if (total == 0) {
+        std::cout << "[clean_map] " << stage << std::endl;
+      } else if (done % 100 == 0) {
         std::cout << "[clean_map] " << stage << " " << done << "/" << total << " keyframes"
                   << std::endl;
       }
-      return g_stop_signal == 0;
+      // Not once stopped: a save into this directory stops this clean and
+      // writes its own "converting", which a late mark would put ours over.
+      if (g_stop_signal != 0) return false;
+      markProgress(stage, done, total);
+      return true;
     });
     if (!done) {
       writeFailed(

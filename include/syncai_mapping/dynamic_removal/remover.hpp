@@ -126,7 +126,11 @@ struct Measurements
 
 // (stage, keyframes done in it, keyframes in poses.txt) -> keep going? Stages
 // "hits", "misses", "map", called per keyframe; false stops the clean with
-// map.pcd untouched and clean() returns false.
+// map.pcd untouched and clean() returns false. "tree" (with Params::octomap,
+// between "misses" and "map") and "write" (last) are called once as they
+// start, with 0 of 0: they have no keyframes to count. recipe.hpp's
+// overallFraction holds each stage's share of the whole, so a stage added
+// here is added there.
 using Progress = std::function<bool(const char *, size_t, size_t)>;
 
 // No poses.txt or no readable patch; its own type so the CLI exits 2, not 3.
