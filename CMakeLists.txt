@@ -76,6 +76,15 @@ target_include_directories(dynamic_removal_recipe PUBLIC
   $<INSTALL_INTERFACE:include>)
 target_link_libraries(dynamic_removal_recipe PRIVATE nlohmann_json::nlohmann_json)
 
+# sessions.json, where each mapping run begins in poses.txt. Its own library
+# because both sides of a save read it: pgos (resume_mapping) and the cleaner,
+# which must not link the pose graph.
+add_library(map_sessions STATIC src/pgos/sessions.cpp)
+target_include_directories(map_sessions PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+target_link_libraries(map_sessions PRIVATE nlohmann_json::nlohmann_json)
+
 add_library(dynamic_removal STATIC src/dynamic_removal/remover.cpp)
 target_include_directories(dynamic_removal PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -83,7 +92,7 @@ target_include_directories(dynamic_removal PUBLIC
   ${OCTOMAP_INCLUDE_DIRS}
   ${EIGEN3_INCLUDE_DIR}
   ${PCL_INCLUDE_DIRS})
-target_link_libraries(dynamic_removal PUBLIC ${OCTOMAP_LIBRARIES} ${PCL_LIBRARIES})
+target_link_libraries(dynamic_removal PUBLIC ${OCTOMAP_LIBRARIES} ${PCL_LIBRARIES} map_sessions)
 
 add_executable(clean_map src/apps/clean_map.cpp)
 target_link_libraries(clean_map dynamic_removal dynamic_removal_recipe)
@@ -124,9 +133,8 @@ target_link_libraries(pgos PUBLIC
   ${PCL_LIBRARIES}
   gtsam
   small_gicp::small_gicp
+  map_sessions
 )
-# sessions.json (map_writer / map_reader).
-target_link_libraries(pgos PRIVATE nlohmann_json::nlohmann_json)
 
 add_executable(pgo_node
   src/apps/pgo_node.cpp
@@ -179,6 +187,10 @@ if(BUILD_TESTING)
   target_link_libraries(test_session_aligner pgos)
   ament_add_gtest(test_octomap_edits test/test_octomap_edits.cpp)
   target_link_libraries(test_octomap_edits dynamic_removal_edits)
+  # The cleaner on generated save directories: what changed between the runs of
+  # a resumed map.
+  ament_add_gtest(test_map_clean test/test_map_clean.cpp TIMEOUT 300)
+  target_link_libraries(test_map_clean dynamic_removal)
   ament_add_gtest(test_recipe test/test_recipe.cpp)
   target_link_libraries(test_recipe dynamic_removal_recipe nlohmann_json::nlohmann_json)
 endif()

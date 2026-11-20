@@ -106,7 +106,7 @@ written. The choice is recorded as the sidecar's `params.octomap`. The node writ
 | `map.pcd` | all keyframes in their corrected global poses, binary, not voxel-filtered; later replaced by `clean_map`'s output. Streamed one keyframe at a time through `map.pcd.save.tmp` and renamed: the merge is never held in memory, and a failed save leaves the previous file whole |
 | `patches/<i>.pcd` | (with `save_patches`) one body-frame cloud per keyframe |
 | `poses.txt` | (with `save_patches`) `<i>.pcd tx ty tz qw qx qy qz` per keyframe |
-| `sessions.json` | (with `save_patches`, a resumed run only) where each mapping run begins in `poses.txt`: `{"version": 1, "sessions": [{"first": 0, "count": 812}, {"first": 812, "count": 240}]}`. A save of a single run writes none and removes a stale one |
+| `sessions.json` | (with `save_patches`, a resumed run only) where each mapping run begins in `poses.txt`: `{"version": 1, "sessions": [{"first": 0, "count": 812}, {"first": 812, "count": 240}]}`. A save of a single run writes none and removes a stale one. Read back by `resume_mapping` and by the clean |
 | `map_clean.recipe.json` | (with `save_patches` and `map_clean_enabled`) the cleaning status |
 | `octomap.bt` | written later by `clean_map` (with `map_clean_octomap`); a save deletes the previous one first |
 | `octomap_edits.json` | not written: the ground patches the console's editor saved (see Ground patches); a save leaves it |
@@ -175,20 +175,36 @@ many **passed through** it (M), and rewrites `map.pcd` without two classes of po
   building. On dp1f_1008_2_v2 it adds 43 k voxels; of the columns with open space above, 89 % (1-2
   m from the path) and 71 % (2-3 m) then have floor, from 72 % and 40 %. A hole no ray looked into
   is not caught; hence the radius.
-- **A resumed map is cleaned as one run.** The clean reads every keyframe of `poses.txt` alike,
-  so across two sessions the dynamic rule also judges what changed between them, and not evenly:
-  something that left is removed only once the new run has looked through it often enough, and
-  something that arrived, seen by a few new keyframes where many old ones looked through, is
-  removed although it is there now. Not yet: counting a miss only from the session of a voxel's
-  last hit or a later one. A height error between the sessions above the floor band (0.1 m) puts
-  one session's floor in the other's dynamic band.
+- **A resumed map is judged run by run where its runs disagree** (`sessions.json`). Counted over
+  every keyframe alike, something that arrived between two runs has a person's signature: hit by
+  the new run's few keyframes, seen through by every old one that looked at the empty spot. It
+  went from `map.pcd` and, as free space, from the tree the planner walks on. So H and M are also
+  kept per run, and a voxel the rule calls dynamic is **kept when it stands from some later run
+  on**: counting that run and the ones after it only, at least `sparse_min_hits` hits and not
+  dynamic. Such a voxel is set occupied in the tree, because the old misses hold its log-odds at
+  the clamp and two hits do not lift it back over the threshold.
+  - Something that **left** is still removed (no later hit to stand on), once the new run has
+    looked through it often enough. A person is removed in whichever run they walked.
+  - **A person who stood still for every scan a later run took of that place is a thing that
+    arrived**, and stays. One run has the same limit.
+  - One run, a map without `sessions.json` or with one that does not fit its `poses.txt`
+    (`sessions_warning` in the measurements) is cleaned exactly as before.
+  - On a 661-keyframe replay cut into two runs with nothing known to have changed between them,
+    641 of 94 995 dynamic voxels were kept this way (0.09 % of the map's points), a few per
+    place over 236 cells of 2 m: thin structure one run saw through and the other only hit. It added
+    1 s to a 71 s clean.
+  - A height error between the runs above the floor band (0.1 m) still puts one run's floor in
+    the other's dynamic band.
+  - `test/test_map_clean.cpp` runs the clean on a generated room with a crate that arrives,
+    leaves, or is there for two scans.
 - **Process model.** A detached child process (`posix_spawn`, own session, `nice`), so it survives
   a mode switch and the OOM killer picks it before `pgo_node`. One clean runs per host (a `flock` on
   `/dev/shm/syncai_pgo/clean_map.lock`). A new save into the same directory stops the old clean.
 
 **Status** is `map_clean.recipe.json`: `converting` → `ok` / `failed`, with `started_at`,
 `finished_at`, the `params` used and, on `ok`, the `measurements`; `octomap_written` says whether
-`octomap.bt` came with it (`octomap_error` says why not). A hard kill leaves it at
+`octomap.bt` came with it (`octomap_error` says why not), `sessions` how many mapping runs the
+clean told apart and `session_kept_voxels` how many voxels a later run kept. A hard kill leaves it at
 `converting` with the raw map. **A 2D map made while it says `converting` came from the raw map**;
 redo it once it reads `ok`.
 
@@ -332,8 +348,7 @@ all the same, which is harmless while idle.
   start of the resume. `dropped_key_poses` counts the run's own keyframes.
 - **Not yet, and it matters**: the planner reads `poses.txt` as one walk. Until it breaks the
   track at `sessions.json`, a resumed map can lay a stair or gap link across the jump between
-  its sessions, so do not navigate on one. The clean's dynamic rule is not session-aware either
-  (see Cleaning map.pcd).
+  its sessions, so do not navigate on one. The clean does read it (see Cleaning map.pcd).
 
 `test/test_resume_mapping.cpp` (the frozen keyframes, the loops against them, the factors) and
 `test/test_session_aligner.cpp` (hint, global search, look-alike place, tilt) run on the synthetic

@@ -15,7 +15,9 @@ and PCL are far more mature there. Three executables:
   waypoints, `keepout.json` and `octomap_edits.json` live in that frame. A resumed run is saved
   to another directory, with `sessions.json` beside `poses.txt` naming where each run begins.
 - `clean_map` (`dynamic_removal/`): the detached post-save job `pgo_node` spawns; it ray-casts
-  the saved patches and rewrites `map.pcd` without people and one-off returns. With
+  the saved patches and rewrites `map.pcd` without people and one-off returns (a resumed map run
+  by run, from `sessions.json`, so that what arrived between two runs is not taken for a
+  person). With
   `map_clean_octomap` (default off) it also writes `octomap.bt` (free + occupied, built in the
   same misses pass; never-seen space is unknown, removed voxels are free only if a ray passed
   through them, hit floor-band voxels stay occupied against grazing rays, and enclosed gaps in the floor within

@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "syncai_mapping/pgos/pose_graph_optimizer.h"
+#include "syncai_mapping/pgos/sessions.h"
 
 /**
  * Writes every keyframe's body cloud, in its global pose, as one binary PCD at `path`: the same
@@ -20,9 +21,6 @@
  */
 void writeMergedMapPcd(
   const std::filesystem::path & path, const std::vector<KeyPoseWithCloud> & key_poses);
-
-// Beside poses.txt: where each mapping run begins in it (see writeKeyframes).
-inline constexpr char kSessionsFile[] = "sessions.json";
 
 /**
  * Writes the keyframes themselves into `dir`, the input clean_map and a later resume_mapping read:

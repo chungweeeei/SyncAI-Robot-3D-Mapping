@@ -15,6 +15,9 @@
 // misses pass already ray-casts every scan, so the tree costs memory, not a
 // second ray-cast.
 //
+// A resumed map (sessions.json beside poses.txt, more than one mapping run)
+// is judged run by run where the runs disagree: see dynamic_miss_ratio.
+//
 // No OctoMap or PCL header here: pgo_node includes this for Params and the
 // file names and links neither library.
 
@@ -80,6 +83,16 @@ struct Params
   // hit / miss log-odds ratio. Thin static structure (a handrail, a chair leg)
   // has the same signature; measure dynamic_voxels before tightening this.
   // dynamic_min_miss <= 0 turns this off.
+  //
+  // Across the runs of a resumed map that count alone is wrong one way round:
+  // a shelf put there between two runs is hit by the new run's few keyframes
+  // and "seen through" by every old one that looked at the empty spot, and
+  // went from map.pcd and, free, from the tree the planner walks on. So a
+  // dynamic voxel is kept when it STANDS FROM SOME LATER RUN ON: counting only
+  // that run and the ones after it, at least sparse_min_hits hits and not
+  // dynamic by the rule above. What left between two runs is still removed
+  // (no later hit to stand on), and so is a person, in whichever run. One run
+  // (no sessions.json) is judged exactly as before.
   double dynamic_miss_ratio = 2.0;
   int dynamic_min_miss = 3;
   // Rays that would pass more than (floor_band - voxel_size) below their own
@@ -108,7 +121,14 @@ struct Measurements
   size_t skipped_patches = 0;  // poses.txt lines whose patch could not be read
   size_t points = 0;           // points judged (after the min_range cut)
   size_t clipped_rays = 0;     // rays stopped at the floor
+  // Mapping runs the clean told apart: sessions.json's, or 1 without the file
+  // or with one that does not fit poses.txt (sessions_warning says why).
+  size_t sessions = 1;
+  std::string sessions_warning;
   size_t dynamic_voxels = 0;
+  // Voxels dynamic over all runs and kept because they stand from a later
+  // run on (not counted in dynamic_voxels). 0 for one run.
+  size_t session_kept_voxels = 0;
   size_t sparse_voxels = 0;
   size_t map_points_removed = 0;
   size_t map_points_kept = 0;

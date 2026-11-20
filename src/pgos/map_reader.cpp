@@ -8,63 +8,9 @@
 #include <stdexcept>
 #include <system_error>
 
-#include "nlohmann/json.hpp"
-#include "syncai_mapping/pgos/map_writer.h"
+#include "syncai_mapping/pgos/sessions.h"
 
-namespace
-{
 namespace fs = std::filesystem;
-
-// sessions.json -> the first keyframe of each run. Anything but an exact tiling of [0, total) is
-// refused whole: half a boundary list is worse than none.
-bool readSessions(
-  const fs::path & path, size_t total, std::vector<size_t> & starts, std::string & why)
-{
-  std::ifstream in(path);
-  if (!in) {
-    why = "cannot open it";
-    return false;
-  }
-  const nlohmann::json doc = nlohmann::json::parse(in, nullptr, false);
-  if (doc.is_discarded() || !doc.is_object()) {
-    why = "not a JSON object";
-    return false;
-  }
-  if (!doc.contains("version") || !doc["version"].is_number_integer() || doc["version"] != 1) {
-    why = "not version 1";
-    return false;
-  }
-  if (!doc.contains("sessions") || !doc["sessions"].is_array() || doc["sessions"].empty()) {
-    why = "no sessions";
-    return false;
-  }
-  size_t next = 0;
-  std::vector<size_t> ret;
-  for (const nlohmann::json & s : doc["sessions"]) {
-    if (
-      !s.is_object() || !s.contains("first") || !s.contains("count") ||
-      !s["first"].is_number_unsigned() || !s["count"].is_number_unsigned()) {
-      why = "a session without first / count";
-      return false;
-    }
-    const size_t first = s["first"].get<size_t>();
-    const size_t count = s["count"].get<size_t>();
-    if (first != next || count == 0) {
-      why = "the sessions do not follow one another";
-      return false;
-    }
-    ret.push_back(first);
-    next = first + count;
-  }
-  if (next != total) {
-    why = "the sessions cover " + std::to_string(next) + " keyframes, poses.txt has " +
-          std::to_string(total);
-    return false;
-  }
-  starts = std::move(ret);
-  return true;
-}
-}  // namespace
 
 SavedMap readSavedMap(const fs::path & dir)
 {
