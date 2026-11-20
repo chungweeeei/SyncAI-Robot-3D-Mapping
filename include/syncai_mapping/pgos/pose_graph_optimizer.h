@@ -160,12 +160,12 @@ struct PoseGraphOptimizerConfig
   double resume_anchor_yaw_sigma_deg = 0.2;
   double resume_anchor_z_sigma_m = 0.02;
   // World-z sigma (m) of a loop against a saved keyframe; <= 0 = off, such a loop is planar like
-  // any other. The two runs level themselves from separate IMU initialisations, and a few tenths
-  // of a degree between them tilts the new run about its start: 0.5 cm per metre at 0.3 deg,
-  // which planar loops never take out and clean_map's floor band (0.1 m) does not forgive. On,
-  // every such loop also holds its source keyframe at the height the registration found. Off
-  // until a replay has shown the registered dz (logged for every such loop) is clean enough to
-  // be trusted: z is where the fork's loops went wrong.
+  // any other. The two runs level themselves from separate IMU initialisations; the alignment
+  // takes that tilt out (loadPrior), to the accuracy of one registration, and what is left of it
+  // tilts the new run about its start (0.2 cm per metre at 0.1 deg), which planar loops never
+  // take out. On, every such loop also holds its source keyframe at the height the registration
+  // found. Off until the registered dz (logged for every such loop) has been seen to be clean
+  // enough to be trusted: z is where the fork's loops went wrong.
   double resume_loop_z_sigma_m = 0.0;
 };
 
@@ -204,8 +204,10 @@ public:
    *
    * What ties the run to them:
    *  - r_offset / t_offset, the map <- odom transform the session alignment found
-   *    (session_aligner.h). A rotation about world z only: the gravity anchor of every keyframe
-   *    takes world up from the LIO rotation, which holds while the two frames share their up.
+   *    (session_aligner.h). Not only a rotation about z: the two runs level themselves a
+   *    fraction of a degree apart, and r_offset carries that. The gravity anchor of every
+   *    keyframe of the run then holds it to the SAVED MAP's up, r_offset^T e_z in the LIO's
+   *    frame, not to the LIO's own.
    *  - the run's first keyframe, anchored at its pose through that offset (resume_anchor_*);
    *  - every loop against a loaded keyframe, a unary factor on its source (smoothAndUpdate).
    *
@@ -287,6 +289,11 @@ private:
   std::vector<LoopPair> m_cache_pairs;
   M3D m_r_offset;
   V3D m_t_offset;
+  // The map's up in the LIO's (odometry) frame: what a keyframe's tilt anchor is measured
+  // against. e_z for a run begun empty, whose map frame is the LIO's; a resumed run's is the
+  // saved map's, as its alignment found it (loadPrior). Fixed for the run, unlike m_r_offset,
+  // which follows the last keyframe through every loop.
+  V3D m_up_in_odom = V3D::UnitZ();
   std::shared_ptr<gtsam::ISAM2> m_isam2;
   gtsam::Values m_initial_values;
   gtsam::NonlinearFactorGraph m_graph;

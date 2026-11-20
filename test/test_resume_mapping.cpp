@@ -66,20 +66,27 @@ struct ResumeResult
   std::vector<size_t> session_starts;
 };
 
-// odom_pitch tilts the run's whole odometry frame about its y axis: the LIO having levelled
-// itself a little wrong, which leaves the rotations (and so the gravity anchors) off by that
-// much and the track climbing as it goes.
-ResumeResult resume(PoseGraphOptimizerConfig config, double yaw_drift_per_step, double odom_pitch)
+// odom_pitch tilts the run's whole odometry frame about its y axis: the LIO's up a little off the
+// saved map's, as two static IMU initialisations leave two runs. With offset_has_tilt the loaded
+// map <- odom carries that tilt, as the session alignment returns it; without, it is the rotation
+// about z of an alignment that missed it, which leaves the gravity anchors off by that much and
+// the track climbing as it goes.
+ResumeResult resume(
+  PoseGraphOptimizerConfig config, double yaw_drift_per_step, double odom_pitch,
+  bool offset_has_tilt = true)
 {
   const std::vector<Pose2> gt = newRunPath();
   const std::vector<KeyPoseWithCloud> & saved = savedMap();
   ResumeResult result;
   result.prior = saved.size();
 
-  // The true map <- odom: the run's first pose. What is loaded is a little off it.
+  // The true map <- odom: out of the tilted odom, then the run's first pose. What is loaded is a
+  // little off it.
+  const M3D tilt = Eigen::AngleAxisd(odom_pitch, V3D::UnitY()).toRotationMatrix();
   const V3D t_true(gt.front().x, gt.front().y, kSensorHeight);
-  const M3D r_offset =
+  M3D r_offset =
     Eigen::AngleAxisd(gt.front().yaw + 0.3 * M_PI / 180.0, V3D::UnitZ()).toRotationMatrix();
+  if (offset_has_tilt) r_offset = r_offset * tilt.transpose();
   const V3D t_offset = t_true + V3D(0.04, -0.03, 0.0);
 
   PoseGraphOptimizer pgo(config);
@@ -94,7 +101,6 @@ ResumeResult resume(PoseGraphOptimizerConfig config, double yaw_drift_per_step, 
     local[i] = Pose2{c * dx + s * dy, -s * dx + c * dy, gt[i].yaw - gt.front().yaw};
   }
 
-  const M3D tilt = Eigen::AngleAxisd(odom_pitch, V3D::UnitY()).toRotationMatrix();
   std::mt19937 rng(31);
   Pose2 odom{0.0, 0.0, 0.0};
   V3D last_local_t = V3D::Zero();
@@ -226,19 +232,37 @@ TEST(ResumeMapping, ScanContextSeesTheSavedMap)
   EXPECT_LT(with.graph_max_error, without.graph_max_error);
 }
 
-// A run whose LIO levelled itself 0.4 deg off climbs 0.7 cm a metre. Planar loops leave that in;
-// with resume_loop_z_sigma_m each loop against the saved map also holds its keyframe's height.
+// A run whose LIO levelled itself 0.8 deg off the saved map (robot01 measured 0.76 between two of
+// its runs). The alignment's transform carries the tilt, each keyframe is anchored to the saved
+// map's up, and the run stays on the saved map's floor; anchored to its own up it climbed
+// 1.4 cm a metre.
+TEST(ResumeMapping, ATiltedRunTakesTheSavedMapsUp)
+{
+  const double pitch = -0.8 * M_PI / 180.0;  // about +y, negative: the track climbs along +x
+  const ResumeResult r = resume(baseConfig(), 0.0006, pitch);
+  print("tilted run, the saved map's up", r);
+  expectResumed(r);
+  EXPECT_LT(r.graph_max_z_error, 0.03);
+
+  const ResumeResult own_up = resume(baseConfig(), 0.0006, pitch, false);
+  print("tilted run, its own up", own_up);
+  EXPECT_GT(own_up.graph_max_z_error, 0.3);
+}
+
+// What an alignment leaves of the tilt, here 0.4 deg of it, still climbs 0.7 cm a metre. Planar
+// loops leave that in; with resume_loop_z_sigma_m each loop against the saved map also holds its
+// keyframe's height.
 TEST(ResumeMapping, LoopHeightHoldsATiltedRun)
 {
   const double pitch = -0.4 * M_PI / 180.0;  // about +y, negative: the track climbs along +x
   PoseGraphOptimizerConfig config = baseConfig();
-  const ResumeResult planar = resume(config, 0.0006, pitch);
+  const ResumeResult planar = resume(config, 0.0006, pitch, false);
   print("tilted run, planar loops", planar);
   EXPECT_TRUE(planar.prior_untouched);
   EXPECT_GT(planar.graph_max_z_error, 0.15);
 
   config.resume_loop_z_sigma_m = 0.05;
-  const ResumeResult held = resume(config, 0.0006, pitch);
+  const ResumeResult held = resume(config, 0.0006, pitch, false);
   print("tilted run, loop height on", held);
   EXPECT_TRUE(held.prior_untouched);
   EXPECT_GT(held.prior_loops, 0);

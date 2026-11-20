@@ -329,17 +329,23 @@ all the same, which is harmless while idle.
   time gate (a saved keyframe is from another run) and their drift gate counts the path since the
   run began. They start with the run's first keyframes and recur every `loop_search_period` while
   the robot is on mapped ground.
-- **The alignment keeps x / y / z / yaw.** Both frames are gravity-aligned, and each keyframe's
-  tilt anchor takes world up from pointlio, so the transform must be a rotation about z. The roll
-  / pitch the registration asked for is dropped, reported (`tilt_residual_deg`), and refuses the
-  resume above `resume_max_tilt_deg`: either the robot moved while pointlio levelled itself, or
-  the registration is wrong.
-- **Height is not corrected by default.** Two runs level themselves from separate IMU
-  initialisations; a few tenths of a degree between them tilts the new run about its start
-  (0.5 cm per metre at 0.3°), and planar loops do not take that out. Every loop against a saved
-  keyframe logs its `registered dz`. `resume_loop_z_sigma_m > 0` makes such a loop also hold its
-  keyframe's height (`HeightPriorFactor`); it is off until that dz has been looked at on a
-  replay.
+- **The run takes the saved map's up.** Both frames are gravity-aligned, but each by its own
+  static IMU initialisation, and two of those do not agree: on robot01 two runs begun 85° apart
+  in heading levelled themselves 0.76° apart, where two begun at one pose differed by 0.08°
+  (an error of about half a degree that turns with the sensor: an accelerometer bias by its
+  signature, not measured as one). So the alignment is the whole `map ← odom` transform, the
+  registration's roll / pitch included (reported as `tilt_residual_deg`), and each new
+  keyframe's tilt anchor holds it to the saved map's up, not to pointlio's own. Dropping that
+  tilt, as this did at first, left the new run leaning on the saved map by 1 cm a metre: on that
+  replay (`record/resume_a` + `resume_b`, 71 + 146 keyframes) the floor both runs saw differed
+  by more than 3 cm in 56 % of its 0.5 m cells, 17 % with the tilt kept, and new keyframes more
+  than 3 m from the start sat 2.9 cm under the saved ones beside them, 0.4 cm now. Above
+  `resume_max_tilt_deg` the resume is refused: that much is a registration gone wrong.
+- **Height is otherwise pointlio's.** What one registration leaves of that tilt, and pointlio's
+  own drift in z (2-3 cm over the 45 m of that replay), stay in: loops are planar. Every loop
+  against a saved keyframe logs its `registered dz`. `resume_loop_z_sigma_m > 0` makes such a
+  loop also hold its keyframe's height (`HeightPriorFactor`); it is off, because on that replay
+  the six such loops' dz scattered by about 1.5 cm, the size of what they would correct.
 - **A place that looks like another one is refused, not guessed** (global search only): a second
   passing registration elsewhere, scoring within `resume_ambiguity_ratio` of the best. A hint
   settles it. A hint that does not register fails the call and is never retried as a global
@@ -404,7 +410,7 @@ default silently.
 | `resume_align_scans` / `resume_align_skip_scans` | `10` / `5` | **ints**, scans accumulated for the alignment / passed over after the LIO reset |
 | `resume_align_timeout_sec` | `15.0` | s, wait for those scans, pointlio's IMU initialisation included |
 | `resume_min_inlier_ratio` / `resume_min_scan_inlier_ratio` | `0.75` / `0.3` | alignment gates: inliers / overlap points (stricter than a loop's), inliers / all scan points. The other registration settings are the `loop_*` ones |
-| `resume_max_tilt_deg` | `1.0` | roll / pitch the alignment may drop; above it the resume is refused |
+| `resume_max_tilt_deg` | `3.0` | deg, the most the run's up may differ from the saved map's (the alignment turns it onto the map's); above it the resume is refused as a registration gone wrong |
 | `resume_target_radius_m` / `resume_target_z_band_m` | `12.0` / `1.5` | m, saved keyframes this close to a candidate are its registration target; the z band is also the storey a hint's z selects |
 | `resume_hint_radius_m` / `resume_hint_yaw_deg` | `3.0` / `45.0` | candidates around a hint |
 | `resume_candidate_spacing_m` / `resume_yaw_step_deg` | `1.0` / `15.0` | the global search's grid |
@@ -513,7 +519,7 @@ ls /dev/shm/syncai_pgo/<robot_id>                        # newest two map_cloud_
 | `[PGONode] idle until start_mapping or resume_mapping is called; …` | normal at launch |
 | `[PGONode][loop] target 44 -> source 252 \| fitness … \| GICP moves source by …` | a loop was accepted; `saved-map target, registered dz …` when the target is a resumed map's keyframe |
 | `[PGONode][resumeMappingCB] candidate at (x, y, z) yaw … \| coarse … \| … \| passed` | one registered candidate of a resume's alignment, with why it was rejected |
-| `[PGONode][resumeMappingCB] Resumed the saved map (N keyframes): the robot is at …` | the resume succeeded; the line ends with how it was found and the tilt it dropped |
+| `[PGONode][resumeMappingCB] Resumed the saved map (N keyframes): the robot is at …` | the resume succeeded; the line ends with how it was found and how far the run's up was turned onto the saved map's |
 | `[saveMapsCB] Map saved (N keyframes). Mapping stopped …` | the run ended |
 | `LIO reset service … is not available` / `Timed out waiting for the LIO reset` | start or reset refused: pointlio is down |
 | `[PGONode] cannot create map_cloud_dir …` | the file hand-off is off for this run; the node keeps running |

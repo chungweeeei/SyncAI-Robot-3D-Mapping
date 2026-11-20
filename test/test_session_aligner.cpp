@@ -70,7 +70,7 @@ struct Stand
 };
 
 // The robot standing at `truth` in `w`. odom_tilt turns the whole odometry frame about its x
-// axis: a LIO that did not level itself.
+// axis: a LIO whose up is not the saved map's.
 Stand standAt(const World & w, const Pose2 & truth, double odom_tilt = 0.0)
 {
   std::mt19937 rng(41);
@@ -86,8 +86,10 @@ Stand standAt(const World & w, const Pose2 & truth, double odom_tilt = 0.0)
     *w.scan(truth, rng), *stand.request.cloud_odom, stand.request.t_body,
     Eigen::Quaterniond(r_tilt * r_odom_yaw));
 
-  stand.r_true = Eigen::AngleAxisd(truth.yaw - kOdomYaw, V3D::UnitZ()).toRotationMatrix();
-  stand.t_true = V3D(truth.x, truth.y, kSensorHeight) - stand.r_true * kOdomPosition;
+  // Out of the tilted odom into a level one, then about z onto the map.
+  stand.r_true =
+    Eigen::AngleAxisd(truth.yaw - kOdomYaw, V3D::UnitZ()).toRotationMatrix() * r_tilt.transpose();
+  stand.t_true = V3D(truth.x, truth.y, kSensorHeight) - stand.r_true * stand.request.t_body;
   return stand;
 }
 
@@ -130,10 +132,13 @@ void expectAligned(const SessionAlignResult & r, const Stand & stand, const Pose
   EXPECT_LT(
     Eigen::Quaterniond(r.r_offset).angularDistance(Eigen::Quaterniond(stand.r_true)),
     0.5 * M_PI / 180.0);
-  // A rotation about z, whatever the registration returned.
-  EXPECT_LT((r.r_offset * V3D::UnitZ() - V3D::UnitZ()).norm(), 1e-12);
   EXPECT_LT((r.position - V3D(truth.x, truth.y, kSensorHeight)).norm(), 0.05);
   EXPECT_LT(std::abs(std::remainder(r.yaw - truth.yaw, 2.0 * M_PI)), 0.5 * M_PI / 180.0);
+}
+
+// The two frames share their up here, so the registration must not invent a tilt.
+void expectLevel(const SessionAlignResult & r)
+{
   EXPECT_LT(r.tilt_residual_deg, 0.2);
 }
 }  // namespace
@@ -147,6 +152,7 @@ TEST(SessionAligner, HintFindsThePose)
   const SessionAlignResult r = aligner.align(saved(), stand.request);
   print("hint", r);
   expectAligned(r, stand, truth);
+  expectLevel(r);
   EXPECT_TRUE(r.used_hint);
 }
 
@@ -161,6 +167,7 @@ TEST(SessionAligner, HintFindsThePoseOffTheTrack)
   const SessionAlignResult r = aligner.align(saved(), stand.request);
   print("hint, off the track", r);
   expectAligned(r, stand, truth);
+  expectLevel(r);
 }
 
 // A hint that is wrong is not an invitation to search: refused, not found somewhere else.
@@ -197,6 +204,7 @@ TEST(SessionAligner, GlobalSearchFindsThePose)
   const SessionAlignResult r = aligner.align(saved(), stand.request);
   print("global", r);
   expectAligned(r, stand, truth);
+  expectLevel(r);
   EXPECT_FALSE(r.used_hint);
 }
 
@@ -216,30 +224,49 @@ TEST(SessionAligner, LookAlikePlaceIsRefusedWithoutAHint)
   const SessionAlignResult hinted = aligner.align(savedSymmetric(), stand.request);
   print("symmetric hall, hint", hinted);
   expectAligned(hinted, stand, truth);
+  expectLevel(hinted);
 }
 
-// An odometry frame 2 deg off level: the registration finds the place and asks for the tilt
-// back. That is dropped, never applied, and too much of it refuses the alignment.
-TEST(SessionAligner, TiltedRunIsRefused)
+// An odometry frame whose up is 0.8 deg off the saved map's, as two static IMU initialisations
+// leave two runs of one robot. The alignment is the whole transform, tilt included: the run takes
+// the saved map's up. A rotation about z alone would leave it leaning by that much for good.
+TEST(SessionAligner, TheRunsUpIsTurnedOntoTheSavedMaps)
 {
   const Pose2 truth{0.4, -7.6, 20.0 * M_PI / 180.0};
-  Stand stand = standAt(world(), truth, 2.0 * M_PI / 180.0);
+  const double tilt = 0.8 * M_PI / 180.0;
+  Stand stand = standAt(world(), truth, tilt);
   hint(stand, truth);
   SessionAligner aligner(config());
   const SessionAlignResult r = aligner.align(saved(), stand.request);
-  print("tilted 2 deg", r);
+  print("tilted 0.8 deg", r);
+  expectAligned(r, stand, truth);
+  EXPECT_NEAR(r.tilt_residual_deg, 0.8, 0.15);
+  // The saved map's up, seen from the odometry frame, is where the tilt put it.
+  const V3D up_in_odom = r.r_offset.transpose() * V3D::UnitZ();
+  const V3D up_true = stand.r_true.transpose() * V3D::UnitZ();
+  EXPECT_LT(std::acos(std::min(1.0, up_in_odom.dot(up_true))), 0.15 * M_PI / 180.0);
+  // A point 20 m from the robot lands where it is: 28 cm off with the tilt dropped.
+  const V3D far(20.0, 0.0, 0.0);
+  EXPECT_LT(((r.r_offset * far + r.t_offset) - (stand.r_true * far + stand.t_true)).norm(), 0.2);
+}
+
+// More tilt than two levellings can differ by is a registration gone wrong, not an up to adopt.
+TEST(SessionAligner, TooMuchTiltIsRefused)
+{
+  const Pose2 truth{0.4, -7.6, 20.0 * M_PI / 180.0};
+  Stand stand = standAt(world(), truth, 5.0 * M_PI / 180.0);
+  hint(stand, truth);
+  SessionAligner aligner(config());
+  const SessionAlignResult r = aligner.align(saved(), stand.request);
+  print("tilted 5 deg", r);
   EXPECT_FALSE(r.success);
-  bool saw_tilt = false;
-  for (const SessionAlignAttempt & a : r.attempts)
-    if (a.registration.registered && std::abs(a.tilt_residual_deg - 2.0) < 0.3) saw_tilt = true;
-  EXPECT_TRUE(saw_tilt);
+  EXPECT_NE(r.message.find("tilt"), std::string::npos) << r.message;
 
   SessionAlignerConfig loose = config();
-  loose.max_tilt_deg = 5.0;
+  loose.max_tilt_deg = 8.0;
   SessionAligner loose_aligner(loose);
   const SessionAlignResult kept = loose_aligner.align(saved(), stand.request);
-  print("tilted 2 deg, gate at 5", kept);
+  print("tilted 5 deg, gate at 8", kept);
   ASSERT_TRUE(kept.success) << kept.message;
-  EXPECT_LT((kept.r_offset * V3D::UnitZ() - V3D::UnitZ()).norm(), 1e-12);
-  EXPECT_NEAR(kept.tilt_residual_deg, 2.0, 0.3);
+  EXPECT_NEAR(kept.tilt_residual_deg, 5.0, 0.3);
 }

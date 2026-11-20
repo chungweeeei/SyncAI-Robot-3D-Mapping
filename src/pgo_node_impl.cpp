@@ -1341,8 +1341,8 @@ void PGONode::resumeMappingCB(
   response->message = buf;
   RCLCPP_WARN(
     this->get_logger(),
-    "[PGONode][%s] %s (%s, %zu candidates, overlap %.2f inlier %.2f fitness %.4f, tilt dropped "
-    "%.2f deg)",
+    "[PGONode][%s] %s (%s, %zu candidates, overlap %.2f inlier %.2f fitness %.4f, the run's up "
+    "turned %.2f deg onto the saved map's)",
     tag, response->message.c_str(), aligned.used_hint ? "hint" : "global search",
     aligned.candidates, aligned.registration.overlap_ratio, aligned.registration.inlier_ratio,
     aligned.registration.fitness, aligned.tilt_residual_deg);

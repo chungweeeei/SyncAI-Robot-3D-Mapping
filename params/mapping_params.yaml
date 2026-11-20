@@ -89,9 +89,11 @@
     # its own gates are stricter than a loop's, since it places the whole run.
     resume_min_inlier_ratio: 0.75        # inliers / overlap points
     resume_min_scan_inlier_ratio: 0.3    # inliers / all scan points
-    # Roll / pitch the registration asks for is dropped (both frames are
-    # gravity-aligned); more of it than this refuses the resume, deg.
-    resume_max_tilt_deg: 1.0
+    # Roll / pitch the registration asks for is kept: two runs level themselves
+    # a fraction of a degree apart (0.76 deg on robot01, 2026-11-20), and the
+    # new one takes the saved map's up. More of it than this refuses the resume
+    # as a registration gone wrong, deg.
+    resume_max_tilt_deg: 3.0
     # Saved keyframes within this of a candidate are its registration target, m;
     # the z band also selects the storey a hint's z names.
     resume_target_radius_m: 12.0

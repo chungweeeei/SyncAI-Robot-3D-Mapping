@@ -26,16 +26,22 @@
  * may stand metres off the old track, and the place may have been passed several times -- and
  * the best registration that passes its gates wins.
  *
- * Two refusals are the point of doing this before the run rather than trusting the first loop:
- *  - GLOBAL only: a second passing registration somewhere else, scoring within ambiguity_ratio of
- *    the best, is a place that looks like another one. Refused, never guessed; a hint resolves
- *    it. A hint is not tested this way (the caller has said which one it is), and a hint that
- *    fails is not retried globally: it usually means the operator and the robot disagree.
- *  - the registration's roll / pitch is DROPPED, not applied: the result is a rotation about
- *    world z plus a translation, because both frames are gravity-aligned and the graph's tilt
- *    anchors rely on their sharing one up (PoseGraphOptimizer::loadPrior). What was dropped is
- *    reported, and above max_tilt_deg the alignment fails: either the robot moved during
- *    Point-LIO's levelling, or the registration is wrong.
+ * A refusal is the point of doing this before the run rather than trusting the first loop.
+ * GLOBAL only: a second passing registration somewhere else, scoring within ambiguity_ratio of
+ * the best, is a place that looks like another one. Refused, never guessed; a hint resolves it.
+ * A hint is not tested this way (the caller has said which one it is), and a hint that fails is
+ * not retried globally: it usually means the operator and the robot disagree.
+ *
+ * THE REGISTRATION'S ROLL / PITCH IS KEPT: the result is the whole map <- odom transform, not a
+ * rotation about z. Both frames are gravity-aligned, but each by its own static IMU
+ * initialisation, and those do not agree: on robot01 two runs begun 85 deg apart in heading
+ * levelled themselves 0.76 deg apart (2026-11-20, record/resume_a + resume_b), where two begun
+ * at one pose differed by 0.08 -- an error of about half a degree that turns with the sensor, an
+ * accelerometer bias by its signature. Dropped, as this did at first, that tilt left the new run
+ * leaning on the saved map: 1 cm a metre, 5.7 cm within 6 m of the start. The saved map is the
+ * one that cannot move, so its up is the run's (PoseGraphOptimizer::loadPrior takes it from this
+ * transform). The tilt is reported, and above max_tilt_deg the alignment fails: by then the
+ * registration is more likely wrong than the levelling that far off.
  *
  * ROS-free. Every threshold here is a first guess, to be calibrated on replays from the attempts
  * the result lists.
@@ -57,7 +63,9 @@ struct SessionAlignerConfig
   double target_radius = 12.0;
   // Also the storey a hint's z selects.
   double target_z_band = 1.5;
-  double max_tilt_deg = 1.0;
+  // The most the two runs' ups may differ (see above). Not a quality gate on the levelling, which
+  // is corrected whatever it is: a sanity bound on the registration.
+  double max_tilt_deg = 3.0;
 
   double hint_radius = 3.0;
   double hint_yaw_deg = 45.0;
@@ -103,13 +111,15 @@ struct SessionAlignResult
   // On failure, a sentence fit for the operator.
   std::string message;
   bool used_hint = false;
-  // map <- odom: a rotation about world z and a translation.
+  // map <- odom, as registered: mostly a rotation about world z, plus the tilt between the two
+  // runs' ups.
   M3D r_offset = M3D::Identity();
   V3D t_offset = V3D::Zero();
   // The body in the map.
   V3D position = V3D::Zero();
   double yaw = 0.0;
   RegistrationReport registration;
+  // The part of r_offset that is not a rotation about z (deg).
   double tilt_residual_deg = 0.0;
   // Candidates scored, and those registered (best coarse score first).
   size_t candidates = 0;

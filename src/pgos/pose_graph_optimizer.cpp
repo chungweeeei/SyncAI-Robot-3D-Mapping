@@ -50,6 +50,7 @@ void PoseGraphOptimizer::loadPrior(
   m_prior_count = m_key_poses.size();
   m_r_offset = r_offset;
   m_t_offset = t_offset;
+  m_up_in_odom = r_offset.transpose() * V3D::UnitZ();
 
   m_session_starts = session_starts;
   if (m_session_starts.empty() || m_session_starts.front() != 0) m_session_starts = {0};
@@ -134,7 +135,9 @@ bool PoseGraphOptimizer::addKeyPose(const CloudWithPose & cloud_with_pose)
 
   // The run's first keyframe: index 0, or the first after the loaded ones of a resumed map.
   const bool first_of_run = idx == m_prior_count;
-  const V3D up = cloud_with_pose.pose.r.transpose() * V3D::UnitZ();
+  // The map's up in the body frame: the LIO's own for a run begun empty, the saved map's for a
+  // resumed one (m_up_in_odom).
+  const V3D up = cloud_with_pose.pose.r.transpose() * m_up_in_odom;
   if (idx == 0) {
     // Node 0 is anchored absolutely.
     gtsam::noiseModel::Diagonal::shared_ptr noise =
@@ -145,7 +148,8 @@ bool PoseGraphOptimizer::addKeyPose(const CloudWithPose & cloud_with_pose)
     // A resumed run: no odometry edge to the keyframe before it, which is the saved map's last
     // one, somewhere else and not a variable. It is held where the alignment's offset puts it,
     // in the world-frame terms a registration is trusted for (planar_anchor_factor.h): x / y /
-    // yaw, z, and the tilt from the LIO. Six constraints, so the run's gauge is fixed here.
+    // yaw, z, and the tilt from the LIO turned onto the saved map's up. Six constraints, so the
+    // run's gauge is fixed here.
     const double yaw_sigma = m_config.resume_anchor_yaw_sigma_deg * M_PI / 180.0;
     m_graph.add(PlanarAnchorFactor(
       idx, gtsam::Vector3(init_t.x(), init_t.y(), yawOf(init_r)),
@@ -170,10 +174,11 @@ bool PoseGraphOptimizer::addKeyPose(const CloudWithPose & cloud_with_pose)
       idx - 1, idx, gtsam::Pose3(gtsam::Rot3(r_between), gtsam::Point3(t_between)), noise));
   }
 
-  // Tilt anchor (gravity_prior_factor.h): world up in the body frame, from the LOCAL (LIO)
-  // rotation, which is gravity-aligned by construction, not from init_r. Global z equals local z
-  // (node 0's prior is its local pose, a resumed run's offset is a rotation about z, and loops
-  // only rotate about z), so the two ups agree. A resumed run's first keyframe has its own above.
+  // Tilt anchor (gravity_prior_factor.h): the map's up in the body frame, from the LOCAL (LIO)
+  // rotation, which observes gravity at every instant, not from init_r. In a run begun empty the
+  // map's up is the LIO's (node 0's prior is its local pose, and loops only rotate about z); in a
+  // resumed one it is the saved map's, which the LIO's is a fraction of a degree off
+  // (m_up_in_odom). A resumed run's first keyframe has its own above.
   if (m_config.keyframe_tilt_sigma_deg > 0.0 && !(first_of_run && idx > 0)) {
     const double s = m_config.keyframe_tilt_sigma_deg * M_PI / 180.0;
     m_graph.add(GravityPriorFactor(

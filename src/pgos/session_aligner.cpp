@@ -288,17 +288,14 @@ SessionAlignResult SessionAligner::align(
 
     Passed p{result.attempts.size(), M3D::Identity(), V3D::Zero()};
     if (attempt.registration.registered) {
-      // map <- odom as registered, then what of it is kept: the yaw, and the body's registered
-      // position (the raw translation column means nothing far from the origin once the
-      // transform rotates). The roll / pitch left over is the two runs' ups disagreeing.
+      // map <- odom as registered, all of it. What is not a rotation about z is the two runs'
+      // ups disagreeing, and it is kept: the saved map's up is the one the run must take.
       const M4D full = transform * toMatrix(r_init, t_init);
-      const M3D r_full = full.block<3, 3>(0, 0);
-      p.r_offset = yawRotation(yawOf(r_full));
-      const V3D body_in_map = r_full * request.t_body + full.block<3, 1>(0, 3);
-      p.t_offset = body_in_map - p.r_offset * request.t_body;
-      attempt.position = body_in_map;
-      attempt.yaw = wrapAngle(yawOf(p.r_offset) + body_yaw);
-      const M3D tilt = p.r_offset.transpose() * r_full;
+      p.r_offset = full.block<3, 3>(0, 0);
+      p.t_offset = full.block<3, 1>(0, 3);
+      attempt.position = p.r_offset * request.t_body + p.t_offset;
+      attempt.yaw = yawOf(p.r_offset * request.r_body);
+      const M3D tilt = yawRotation(-yawOf(p.r_offset)) * p.r_offset;
       attempt.tilt_residual_deg = Eigen::AngleAxisd(tilt).angle() * 180.0 / M_PI;
     }
     if (ok && attempt.registration.source_inlier_ratio < m_config.min_source_inlier_ratio) {
@@ -307,7 +304,7 @@ SessionAlignResult SessionAligner::align(
     }
     if (ok && attempt.tilt_residual_deg > m_config.max_tilt_deg) {
       ok = false;
-      attempt.reject_reason = "tilt (the two runs' up directions disagree)";
+      attempt.reject_reason = "tilt (the two runs' up directions are too far apart)";
     }
     if (ok && request.use_hint) {
       // Within reach of what was asked: a registration that walked off to another place is not
