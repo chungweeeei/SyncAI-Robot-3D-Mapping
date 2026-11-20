@@ -1,49 +1,25 @@
 #include "syncai_mapping/pgos/pose_graph_optimizer.h"
 
-#include <Eigen/Eigenvalues>
 #include <algorithm>
+#include <cassert>
 #include <cmath>
+
+#include "syncai_mapping/pgos/registration.h"
 
 namespace
 {
 // Scan Context: candidates kept by the ring-key preselection.
 constexpr size_t kScRingKeyCandidates = 10;
-// The coarse stage (Scan Context candidates, and radius candidates beyond loop_search_radius),
-// relative to the fine one: 3x voxel and 3x correspondence distance, so a ~3 m offset converges.
-constexpr double kCoarseFactor = 3.0;
 // After a loop, smoothAndUpdate runs at least kMinLoopIterations extra iSAM2 steps (upstream's
 // fixed count), then until the newest keyframe moves less than kLoopSettledTangent (tangent norm,
 // rad and m) per step, at most kMaxLoopIterations.
 constexpr int kMinLoopIterations = 4;
 constexpr int kMaxLoopIterations = 20;
 constexpr double kLoopSettledTangent = 1e-5;
-
-M3D yawRotation(double yaw)
-{
-  return Eigen::AngleAxisd(yaw, V3D::UnitZ()).toRotationMatrix();
-}
-double yawOf(const M3D & r)
-{
-  return std::atan2(r(1, 0), r(0, 0));
-}
-
-M4D toMatrix(const M3D & r, const V3D & t)
-{
-  M4D m = M4D::Identity();
-  m.block<3, 3>(0, 0) = r;
-  m.block<3, 1>(0, 3) = t;
-  return m;
-}
-
-CloudType::Ptr voxelized(const CloudType::Ptr & cloud, double resolution)
-{
-  CloudType::Ptr ret(new CloudType);
-  pcl::VoxelGrid<PointType> voxel_grid;
-  voxel_grid.setLeafSize(resolution, resolution, resolution);
-  voxel_grid.setInputCloud(cloud);
-  voxel_grid.filter(*ret);
-  return ret;
-}
+// Tilt sigma (rad) of a resumed run's first keyframe. Tight and unconditional: with
+// keyframe_tilt_sigma_deg off nothing else would constrain that keyframe's roll / pitch (a run
+// begun empty has node 0's 6-DOF prior for it), and iSAM2 throws on the indeterminate system.
+constexpr double kAnchorTiltSigma = 1e-4;
 }  // namespace
 
 PoseGraphOptimizer::PoseGraphOptimizer(const PoseGraphOptimizerConfig & config) : m_config(config)
@@ -57,26 +33,78 @@ PoseGraphOptimizer::PoseGraphOptimizer(const PoseGraphOptimizerConfig & config) 
   m_r_offset.setIdentity();
   m_t_offset.setZero();
 
-  // Same settings as syncai_localizer's refine stage. setNumThreads() must precede the first
-  // setInputTarget() (the kd-tree builder reads it).
-  m_gicp.setNumThreads(m_config.loop_gicp_num_threads);
-  m_gicp.setCorrespondenceRandomness(m_config.loop_gicp_num_neighbors);
-  m_gicp.setRegistrationType("GICP");
-  m_gicp.setMaximumIterations(50);
-  m_gicp.setMaxCorrespondenceDistance(m_config.loop_gicp_max_corr_dist);
-  m_gicp.setTransformationEpsilon(1e-6);
+  configureGicp(
+    m_gicp, m_config.loop_gicp_num_threads, m_config.loop_gicp_num_neighbors,
+    m_config.loop_gicp_max_corr_dist);
+  configureGicp(
+    m_gicp_coarse, m_config.loop_gicp_num_threads, m_config.loop_gicp_num_neighbors,
+    kCoarseFactor * m_config.loop_gicp_max_corr_dist);
+}
 
-  m_gicp_coarse.setNumThreads(m_config.loop_gicp_num_threads);
-  m_gicp_coarse.setCorrespondenceRandomness(m_config.loop_gicp_num_neighbors);
-  m_gicp_coarse.setRegistrationType("GICP");
-  m_gicp_coarse.setMaximumIterations(50);
-  m_gicp_coarse.setMaxCorrespondenceDistance(kCoarseFactor * m_config.loop_gicp_max_corr_dist);
-  m_gicp_coarse.setTransformationEpsilon(1e-6);
+void PoseGraphOptimizer::loadPrior(
+  std::vector<KeyPoseWithCloud> && prior, const std::vector<size_t> & session_starts,
+  const M3D & r_offset, const V3D & t_offset)
+{
+  assert(m_key_poses.empty());
+  m_key_poses = std::move(prior);
+  m_prior_count = m_key_poses.size();
+  m_r_offset = r_offset;
+  m_t_offset = t_offset;
+
+  m_session_starts = session_starts;
+  if (m_session_starts.empty() || m_session_starts.front() != 0) m_session_starts = {0};
+  if (m_prior_count > 0) m_session_starts.push_back(m_prior_count);
+
+  for (KeyPoseWithCloud & kp : m_key_poses) {
+    kp.travelled = 0.0;
+    // The global rotation stands in for the LIO one: the saved frame is gravity-aligned too.
+    if (m_config.loop_sc_enabled) makeScanContext(kp, kp.r_global);
+  }
+}
+
+double PoseGraphOptimizer::pathSince(const KeyPoseWithCloud & cur, size_t target) const
+{
+  return isPrior(target) ? cur.travelled : cur.travelled - m_key_poses[target].travelled;
+}
+
+bool PoseGraphOptimizer::pastTimeGate(const KeyPoseWithCloud & cur, size_t target) const
+{
+  return isPrior(target) ||
+         std::abs(cur.time - m_key_poses[target].time) > m_config.loop_time_tresh;
+}
+
+std::pair<int, int> PoseGraphOptimizer::sessionRange(int idx) const
+{
+  int first = 0;
+  int end = static_cast<int>(m_key_poses.size());
+  for (size_t start : m_session_starts) {
+    const int s = static_cast<int>(start);
+    if (s <= idx) {
+      first = s;
+    } else {
+      end = s;
+      break;
+    }
+  }
+  return {first, end};
+}
+
+void PoseGraphOptimizer::makeScanContext(KeyPoseWithCloud & item, const M3D & r) const
+{
+  // Level the scan with the tilt, keeping its yaw: the descriptor then depends on place and
+  // heading only, and distance() recovers the heading.
+  const M3D tilt = yawRotation(-yawOf(r)) * r;
+  CloudType level;
+  pcl::transformPointCloud(*item.body_cloud, level, V3D::Zero().eval(), Eigen::Quaterniond(tilt));
+  item.sc_desc = ScanContext::make(level, m_config.loop_sc_max_range);
+  item.sc_ring_key = ScanContext::ringKey(item.sc_desc);
 }
 
 bool PoseGraphOptimizer::isKeyPose(const PoseWithTime & pose)
 {
-  if (m_key_poses.size() == 0) return true;
+  // The run's first pair is a keyframe. Also what keeps the test below off a loaded keyframe,
+  // which has no LIO pose to compare with.
+  if (m_key_poses.size() == m_prior_count) return true;
 
   const KeyPoseWithCloud & last_item = m_key_poses.back();
 
@@ -104,12 +132,30 @@ bool PoseGraphOptimizer::addKeyPose(const CloudWithPose & cloud_with_pose)
 
   m_initial_values.insert(idx, gtsam::Pose3(gtsam::Rot3(init_r), gtsam::Point3(init_t)));
 
+  // The run's first keyframe: index 0, or the first after the loaded ones of a resumed map.
+  const bool first_of_run = idx == m_prior_count;
+  const V3D up = cloud_with_pose.pose.r.transpose() * V3D::UnitZ();
   if (idx == 0) {
     // Node 0 is anchored absolutely.
     gtsam::noiseModel::Diagonal::shared_ptr noise =
       gtsam::noiseModel::Diagonal::Variances(gtsam::Vector6::Ones() * 1e-12);
     m_graph.add(gtsam::PriorFactor<gtsam::Pose3>(
       idx, gtsam::Pose3(gtsam::Rot3(init_r), gtsam::Point3(init_t)), noise));
+  } else if (first_of_run) {
+    // A resumed run: no odometry edge to the keyframe before it, which is the saved map's last
+    // one, somewhere else and not a variable. It is held where the alignment's offset puts it,
+    // in the world-frame terms a registration is trusted for (planar_anchor_factor.h): x / y /
+    // yaw, z, and the tilt from the LIO. Six constraints, so the run's gauge is fixed here.
+    const double yaw_sigma = m_config.resume_anchor_yaw_sigma_deg * M_PI / 180.0;
+    m_graph.add(PlanarAnchorFactor(
+      idx, gtsam::Vector3(init_t.x(), init_t.y(), yawOf(init_r)),
+      gtsam::noiseModel::Diagonal::Sigmas(gtsam::Vector3(
+        m_config.resume_anchor_xy_sigma_m, m_config.resume_anchor_xy_sigma_m, yaw_sigma))));
+    m_graph.add(HeightPriorFactor(
+      idx, init_t.z(), gtsam::noiseModel::Isotropic::Sigma(1, m_config.resume_anchor_z_sigma_m)));
+    m_graph.add(GravityPriorFactor(
+      idx, gtsam::Vector3(up.x(), up.y(), up.z()),
+      gtsam::noiseModel::Isotropic::Sigma(3, kAnchorTiltSigma)));
   } else {
     const KeyPoseWithCloud & last_item = m_key_poses.back();
 
@@ -126,10 +172,10 @@ bool PoseGraphOptimizer::addKeyPose(const CloudWithPose & cloud_with_pose)
 
   // Tilt anchor (gravity_prior_factor.h): world up in the body frame, from the LOCAL (LIO)
   // rotation, which is gravity-aligned by construction, not from init_r. Global z equals local z
-  // (node 0's prior is its local pose and loops only rotate about z), so the two ups agree.
-  if (m_config.keyframe_tilt_sigma_deg > 0.0) {
+  // (node 0's prior is its local pose, a resumed run's offset is a rotation about z, and loops
+  // only rotate about z), so the two ups agree. A resumed run's first keyframe has its own above.
+  if (m_config.keyframe_tilt_sigma_deg > 0.0 && !(first_of_run && idx > 0)) {
     const double s = m_config.keyframe_tilt_sigma_deg * M_PI / 180.0;
-    const V3D up = cloud_with_pose.pose.r.transpose() * V3D::UnitZ();
     m_graph.add(GravityPriorFactor(
       idx, gtsam::Vector3(up.x(), up.y(), up.z()), gtsam::noiseModel::Isotropic::Sigma(3, s)));
   }
@@ -141,20 +187,11 @@ bool PoseGraphOptimizer::addKeyPose(const CloudWithPose & cloud_with_pose)
   item.body_cloud = cloud_with_pose.cloud;
   item.r_global = init_r;
   item.t_global = init_t;
-  item.travelled = idx == 0 ? 0.0
-                            : m_key_poses.back().travelled +
-                                (cloud_with_pose.pose.t - m_key_poses.back().t_local).norm();
-  if (m_config.loop_sc_enabled) {
-    // Level the scan with the LIO tilt, keeping its yaw: the descriptor then depends on place and
-    // heading only, and distance() recovers the heading.
-    const M3D & r = cloud_with_pose.pose.r;
-    const M3D tilt = yawRotation(-yawOf(r)) * r;
-    CloudType level;
-    pcl::transformPointCloud(
-      *cloud_with_pose.cloud, level, V3D::Zero().eval(), Eigen::Quaterniond(tilt));
-    item.sc_desc = ScanContext::make(level, m_config.loop_sc_max_range);
-    item.sc_ring_key = ScanContext::ringKey(item.sc_desc);
-  }
+  item.travelled = first_of_run ? 0.0
+                                : m_key_poses.back().travelled +
+                                    (cloud_with_pose.pose.t - m_key_poses.back().t_local).norm();
+  // With the LIO tilt (see makeScanContext).
+  if (m_config.loop_sc_enabled) makeScanContext(item, cloud_with_pose.pose.r);
   m_key_poses.push_back(item);
   return true;
 }
@@ -162,8 +199,11 @@ bool PoseGraphOptimizer::addKeyPose(const CloudWithPose & cloud_with_pose)
 CloudType::Ptr PoseGraphOptimizer::getSubMap(int idx, int half_range, double resolution)
 {
   assert(idx >= 0 && idx < static_cast<int>(m_key_poses.size()));
-  int min_idx = std::max(0, idx - half_range);
-  int max_idx = std::min(static_cast<int>(m_key_poses.size()) - 1, idx + half_range);
+  // Index neighbours are neighbours on the ground only within one run: the keyframe after a saved
+  // map's last one is wherever this run began.
+  const auto [first, end] = sessionRange(idx);
+  int min_idx = std::max(first, idx - half_range);
+  int max_idx = std::min(end - 1, idx + half_range);
 
   CloudType::Ptr ret(new CloudType);
   for (int i = min_idx; i <= max_idx; i++) {
@@ -203,12 +243,11 @@ std::vector<PoseGraphOptimizer::LoopCandidate> PoseGraphOptimizer::radiusCandida
   std::vector<std::pair<double, size_t>> near;  // (xy distance, index)
   for (size_t i = 0; i < cur_idx; i++) {
     const KeyPoseWithCloud & kp = m_key_poses[i];
-    if (std::abs(cur.time - kp.time) <= m_config.loop_time_tresh) continue;
+    if (!pastTimeGate(cur, i)) continue;
     if (std::abs(kp.t_global.z() - cur.t_global.z()) > m_config.loop_search_radius) continue;
     double allowed = m_config.loop_search_radius;
     if (scaled)
-      allowed = std::min(
-        cap, std::max(allowed, m_config.loop_max_drift_ratio * (cur.travelled - kp.travelled)));
+      allowed = std::min(cap, std::max(allowed, m_config.loop_max_drift_ratio * pathSince(cur, i)));
     const double d = (kp.t_global - cur.t_global).head<2>().norm();
     if (d <= allowed) near.emplace_back(d, i);
   }
@@ -245,11 +284,10 @@ bool PoseGraphOptimizer::scanContextCandidate(size_t cur_idx, LoopCandidate & ca
   std::vector<std::pair<float, size_t>> by_key;
   for (size_t i = 0; i < cur_idx; i++) {
     const KeyPoseWithCloud & kp = m_key_poses[i];
-    if (cur.time - kp.time <= m_config.loop_time_tresh) continue;
+    if (!isPrior(i) && cur.time - kp.time <= m_config.loop_time_tresh) continue;
     if (m_config.loop_max_drift_ratio > 0.0) {
-      const double allowed = std::max(
-        m_config.loop_search_radius,
-        m_config.loop_max_drift_ratio * (cur.travelled - kp.travelled));
+      const double allowed =
+        std::max(m_config.loop_search_radius, m_config.loop_max_drift_ratio * pathSince(cur, i));
       if ((kp.t_global - cur.t_global).head<2>().norm() > allowed + reach) continue;
     }
     by_key.emplace_back((kp.sc_ring_key - cur.sc_ring_key).squaredNorm(), i);
@@ -307,73 +345,26 @@ bool PoseGraphOptimizer::verifyCandidate(
   if (m_config.loop_submap_resolution > 0)
     source = voxelized(source, m_config.loop_submap_resolution);
 
-  M4F guess = M4F::Identity();
-  CloudType::Ptr aligned(new CloudType);
-  if (candidate.coarse) {
-    // Coarse first: the guess can be metres off, beyond the fine stage's correspondence distance.
-    const double coarse_res = kCoarseFactor * std::max(m_config.loop_submap_resolution, 0.05);
-    m_gicp_coarse.setInputSource(voxelized(source, coarse_res));
-    m_gicp_coarse.setInputTarget(voxelized(target, coarse_res));
-    m_gicp_coarse.align(*aligned);
-    if (!m_gicp_coarse.hasConverged()) {
-      report.reject_reason = "coarse GICP did not converge";
-      return false;
-    }
-    guess = m_gicp_coarse.getFinalTransformation();
-  }
-
-  m_gicp.setInputSource(source);
-  m_gicp.setInputTarget(target);
-  m_gicp.align(*aligned, guess);
-  if (!m_gicp.hasConverged()) {
-    report.reject_reason = "GICP did not converge";
-    return false;
-  }
-  report.converged = true;
-  const M4D transform = m_gicp.getFinalTransformation().cast<double>();
-
-  // Overlap / inlier / fitness over the aligned source (see the config).
-  pcl::KdTreeFLANN<PointType> tree;
-  tree.setInputCloud(target);
-  const double overlap_sq = m_config.loop_gicp_max_corr_dist * m_config.loop_gicp_max_corr_dist;
-  const double inlier_sq = m_config.loop_inlier_dist * m_config.loop_inlier_dist;
-  size_t n_overlap = 0;
-  size_t n_inlier = 0;
-  double sum_sq = 0.0;
-  std::vector<int> nn_id(1);
-  std::vector<float> nn_sq(1);
-  for (const PointType & p : aligned->points) {
-    if (tree.nearestKSearch(p, 1, nn_id, nn_sq) == 0 || nn_sq[0] > overlap_sq) continue;
-    n_overlap++;
-    sum_sq += nn_sq[0];
-    if (nn_sq[0] <= inlier_sq) n_inlier++;
-  }
-  report.overlap_ratio = aligned->empty() ? 0.0 : static_cast<double>(n_overlap) / aligned->size();
-  report.inlier_ratio = n_overlap == 0 ? 0.0 : static_cast<double>(n_inlier) / n_overlap;
-  report.fitness = n_overlap == 0 ? 1e9 : sum_sq / n_overlap;
-
-  // Hessian order (rx, ry, rz, tx, ty, tz), perturbing the already world-frame source: the
-  // (tx, ty) block is world x / y.
-  const Eigen::Matrix2d h_xy = m_gicp.getFinalHessian().block<2, 2>(3, 3);
-  const Eigen::Vector2d ev = Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d>(h_xy).eigenvalues();
-  report.xy_info_ratio = ev(1) > 0.0 ? std::max(ev(0), 0.0) / ev(1) : 0.0;
-
-  if (report.overlap_ratio < m_config.loop_min_overlap_ratio) {
-    report.reject_reason = "overlap ratio";
-    return false;
-  }
-  if (report.inlier_ratio < m_config.loop_min_inlier_ratio) {
-    report.reject_reason = "inlier ratio";
-    return false;
-  }
-  if (report.fitness > m_config.loop_score_tresh) {
-    report.reject_reason = "fitness";
-    return false;
-  }
-  if (
-    m_config.loop_min_xy_info_ratio > 0.0 &&
-    report.xy_info_ratio < m_config.loop_min_xy_info_ratio) {
-    report.reject_reason = "degenerate (xy info ratio)";
+  // GICP and the overlap / inlier / fitness / degeneracy gates (registration.h).
+  RegistrationGates gates;
+  gates.resolution = m_config.loop_submap_resolution;
+  gates.max_corr_dist = m_config.loop_gicp_max_corr_dist;
+  gates.inlier_dist = m_config.loop_inlier_dist;
+  gates.min_overlap_ratio = m_config.loop_min_overlap_ratio;
+  gates.min_inlier_ratio = m_config.loop_min_inlier_ratio;
+  gates.score_tresh = m_config.loop_score_tresh;
+  gates.min_xy_info_ratio = m_config.loop_min_xy_info_ratio;
+  RegistrationReport reg;
+  M4D transform = M4D::Identity();
+  const bool registered = registerAndScore(
+    m_gicp, m_gicp_coarse, source, target, candidate.coarse, gates, reg, transform);
+  report.converged = reg.converged;
+  report.fitness = reg.fitness;
+  report.overlap_ratio = reg.overlap_ratio;
+  report.inlier_ratio = reg.inlier_ratio;
+  report.xy_info_ratio = reg.xy_info_ratio;
+  if (!registered) {
+    report.reject_reason = reg.reject_reason;
     return false;
   }
 
@@ -382,7 +373,7 @@ bool PoseGraphOptimizer::verifyCandidate(
   report.correction_m = (refined.block<2, 1>(0, 3) - cur.t_global.head<2>()).norm();
   report.allowed_m = std::max(
     m_config.loop_search_radius,
-    m_config.loop_max_drift_ratio * (cur.travelled - m_key_poses[candidate.target_id].travelled));
+    m_config.loop_max_drift_ratio * pathSince(cur, candidate.target_id));
   if (m_config.loop_max_drift_ratio > 0.0 && report.correction_m > report.allowed_m) {
     report.reject_reason = "drift (correction too large for the path travelled)";
     return false;
@@ -447,6 +438,10 @@ LoopPair PoseGraphOptimizer::makeLoopPair(
 {
   // World-frame correction mapping the source keyframe's world cloud onto the submap.
   M4D loop_transform = correction;
+  // What the registration asked of the source's height, before the projection below drops it.
+  const V3D src_before = m_key_poses[cur_idx].t_global;
+  const double registered_dz =
+    (correction.block<3, 3>(0, 0) * src_before + correction.block<3, 1>(0, 3)).z() - src_before.z();
   if (m_config.loop_planar_correction) {
     // Keep only x / y / yaw; world z, roll and pitch stay as the graph has them. The source POSE
     // is displaced by the registration's xy displacement (the raw translation column is
@@ -465,6 +460,7 @@ LoopPair PoseGraphOptimizer::makeLoopPair(
   one_pair.source_id = cur_idx;
   one_pair.target_id = loop_idx;
   one_pair.score = score;
+  one_pair.registered_dz = registered_dz;
   one_pair.gicp_r = loop_transform.block<3, 3>(0, 0);
   one_pair.gicp_t = loop_transform.block<3, 1>(0, 3);
 
@@ -500,6 +496,11 @@ void PoseGraphOptimizer::smoothAndUpdate()
 
   if (has_loop) {
     for (LoopPair & pair : m_cache_pairs) {
+      // A loop against a keyframe of a resumed map: the target is a constant, not a variable, so
+      // the same measurement becomes a unary factor on the source (naming the target's key would
+      // throw, it is not in the graph).
+      const bool prior_target = isPrior(pair.target_id);
+      const KeyPoseWithCloud & target = m_key_poses[pair.target_id];
       // Pose3 tangent order (roll, pitch, yaw, x, y, z). The 6-DOF fallback keeps the fork's
       // "variance = fitness" on x / y / yaw but a tight value on roll / pitch / z, since the
       // chain is too compliant in z to take a tilt or z request from a loop.
@@ -511,19 +512,39 @@ void PoseGraphOptimizer::smoothAndUpdate()
         const double yaw_sigma = m_config.loop_noise_yaw_sigma_deg * M_PI / 180.0;
         const double yaw_var =
           m_config.loop_noise_yaw_sigma_deg > 0.0 ? yaw_sigma * yaw_sigma : pair.score;
-        m_graph.add(PlanarLoopFactor(
-          pair.target_id, pair.source_id, pair.planar_meas,
-          robustify(
-            gtsam::noiseModel::Diagonal::Variances(gtsam::Vector3(xy_var, xy_var, yaw_var)))));
+        const gtsam::SharedNoiseModel noise = robustify(
+          gtsam::noiseModel::Diagonal::Variances(gtsam::Vector3(xy_var, xy_var, yaw_var)));
+        if (!prior_target) {
+          m_graph.add(PlanarLoopFactor(pair.target_id, pair.source_id, pair.planar_meas, noise));
+          continue;
+        }
+        m_graph.add(PlanarAnchorFactor(
+          pair.source_id,
+          gtsam::Vector3(
+            target.t_global.x() + pair.planar_meas.x(), target.t_global.y() + pair.planar_meas.y(),
+            PlanarLoopFactor::wrapAngle(yawOf(target.r_global) + pair.planar_meas.z())),
+          noise));
+        // The height too, when asked for (see resume_loop_z_sigma_m). The source's z has not
+        // moved since makeLoopPair() read it: both run in the same keyframe tick.
+        if (m_config.resume_loop_z_sigma_m > 0.0)
+          m_graph.add(HeightPriorFactor(
+            pair.source_id, m_key_poses[pair.source_id].t_global.z() + pair.registered_dz,
+            robustify(gtsam::noiseModel::Isotropic::Sigma(1, m_config.resume_loop_z_sigma_m))));
         continue;
       }
       const double rpz = m_config.loop_noise_var_roll_pitch_z;
       gtsam::Vector6 var;
       var << rpz, rpz, pair.score, pair.score, pair.score, rpz;
-      m_graph.add(gtsam::BetweenFactor<gtsam::Pose3>(
-        pair.target_id, pair.source_id,
-        gtsam::Pose3(gtsam::Rot3(pair.r_offset), gtsam::Point3(pair.t_offset)),
-        robustify(gtsam::noiseModel::Diagonal::Variances(var))));
+      const gtsam::SharedNoiseModel noise = robustify(gtsam::noiseModel::Diagonal::Variances(var));
+      const gtsam::Pose3 relative(gtsam::Rot3(pair.r_offset), gtsam::Point3(pair.t_offset));
+      if (prior_target) {
+        // A BetweenFactor from a fixed pose is a prior at that pose composed with the measurement.
+        const gtsam::Pose3 fixed(gtsam::Rot3(target.r_global), gtsam::Point3(target.t_global));
+        m_graph.add(gtsam::PriorFactor<gtsam::Pose3>(pair.source_id, fixed * relative, noise));
+      } else {
+        m_graph.add(
+          gtsam::BetweenFactor<gtsam::Pose3>(pair.target_id, pair.source_id, relative, noise));
+      }
     }
     std::vector<LoopPair>().swap(m_cache_pairs);
   }
@@ -554,8 +575,10 @@ void PoseGraphOptimizer::smoothAndUpdate()
   m_graph.resize(0);
   m_initial_values.clear();
 
+  // From the run's first keyframe: the loaded ones of a resumed map are not in the estimate (and
+  // must not move).
   gtsam::Values estimate_values = m_isam2->calculateBestEstimate();
-  for (size_t i = 0; i < m_key_poses.size(); i++) {
+  for (size_t i = m_prior_count; i < m_key_poses.size(); i++) {
     gtsam::Pose3 pose = estimate_values.at<gtsam::Pose3>(i);
     m_key_poses[i].r_global = pose.rotation().matrix().cast<double>();
     m_key_poses[i].t_global = pose.translation().matrix().cast<double>();

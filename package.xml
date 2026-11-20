@@ -27,7 +27,7 @@
   <depend>tf2_ros</depend>
   <depend>pcl_conversions</depend>
   <depend>message_filters</depend>
-  <!-- StartMapping / SaveMaps / ResetMapping (served) and ResetLIO (client);
+  <!-- StartMapping / ResumeMapping / SaveMaps / ResetMapping (served) and ResetLIO (client);
        from `vcs import < dependencies.repos`. -->
   <depend>syncai_common</depend>
   <!-- Loop verification. Not a rosdep key: a src/third-party cmake package
@@ -38,7 +38,7 @@
   <!-- clean_map: voxel keys, ray traversal and the optional octomap.bt.
        A real rosdep key (ros-humble-octomap). -->
   <depend>octomap</depend>
-  <!-- The map_cloud_file notice and map_clean.recipe.json (nlohmann-json3-dev). -->
+  <!-- The map_cloud_file notice, map_clean.recipe.json and sessions.json (nlohmann-json3-dev). -->
   <depend>nlohmann-json-dev</depend>
 
   <!-- Not listed on purpose: PCL / Eigen come through pcl_conversions.

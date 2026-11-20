@@ -1,8 +1,7 @@
-// Loop closure end to end on a synthetic building: a 40 x 24 m hall with
-// pillars and furniture, driven around a 30 x 16 m rectangle 1.3 times with
-// odometry whose yaw drifts by a constant rate. Every keyframe gets the
-// points within the lidar range (no occlusion), in the body frame, with
-// 1 cm noise. The graph sees only the drifted odometry and those clouds.
+// Loop closure end to end on a synthetic building (synthetic_hall.h): the
+// hall driven around its 30 x 16 m rectangle 1.3 times with odometry whose yaw
+// drifts by a constant rate. The graph sees only the drifted odometry and the
+// keyframes' clouds.
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -13,106 +12,11 @@
 #include <vector>
 
 #include "syncai_mapping/pgos/pose_graph_optimizer.h"
+#include "synthetic_hall.h"
 
 namespace
 {
-constexpr double kSensorHeight = 0.5;
-constexpr double kRange = 15.0;
-constexpr double kStep = 0.55;  // > keyframe_delta_m, so every step is a keyframe
-
-struct Pose2
-{
-  double x, y, yaw;
-};
-
-class World
-{
-public:
-  World()
-  {
-    std::mt19937 rng(7);
-    std::uniform_real_distribution<double> ux(-19.0, 19.0), uy(-11.0, 11.0), us(0.4, 1.2),
-      uh(0.8, 3.0);
-    for (double x = -20.0; x <= 20.0; x += 0.3)
-      for (double y = -12.0; y <= 12.0; y += 0.3) add(x, y, 0.0);
-    for (double z = 0.0; z <= 3.0; z += 0.15) {
-      for (double x = -20.0; x <= 20.0; x += 0.15) {
-        add(x, -12.0, z);
-        add(x, 12.0, z);
-      }
-      for (double y = -12.0; y <= 12.0; y += 0.15) {
-        add(-20.0, y, z);
-        add(20.0, y, z);
-      }
-    }
-    // Boxes of random footprint and height, kept off the driven rectangle.
-    int boxes = 0;
-    while (boxes < 40) {
-      const double cx = ux(rng), cy = uy(rng), s = us(rng), h = uh(rng);
-      const bool on_path_y = std::abs(std::abs(cy) - 8.0) < 1.5 + s && std::abs(cx) < 16.5 + s;
-      const bool on_path_x = std::abs(std::abs(cx) - 15.0) < 1.5 + s && std::abs(cy) < 9.5 + s;
-      if (on_path_x || on_path_y) continue;
-      for (double z = 0.0; z <= h; z += 0.15)
-        for (double a = -s; a <= s; a += 0.15) {
-          add(cx + a, cy - s, z);
-          add(cx + a, cy + s, z);
-          add(cx - s, cy + a, z);
-          add(cx + s, cy + a, z);
-        }
-      boxes++;
-    }
-  }
-
-  // The scan from a ground-truth pose, in the body frame.
-  CloudType::Ptr scan(const Pose2 & p, std::mt19937 & rng) const
-  {
-    std::normal_distribution<float> noise(0.0f, 0.01f);
-    CloudType::Ptr cloud(new CloudType);
-    const double c = std::cos(p.yaw), s = std::sin(p.yaw);
-    for (const V3D & w : m_points) {
-      const double dx = w.x() - p.x, dy = w.y() - p.y;
-      if (dx * dx + dy * dy > kRange * kRange) continue;
-      PointType q;
-      q.x = static_cast<float>(c * dx + s * dy) + noise(rng);
-      q.y = static_cast<float>(-s * dx + c * dy) + noise(rng);
-      q.z = static_cast<float>(w.z() - kSensorHeight) + noise(rng);
-      q.intensity = 0.0f;
-      cloud->push_back(q);
-    }
-    return cloud;
-  }
-
-private:
-  void add(double x, double y, double z) { m_points.emplace_back(x, y, z); }
-  std::vector<V3D> m_points;
-};
-
-// The ground-truth path: forward steps along the rectangle, each corner a
-// left turn in place in 15 deg steps.
-std::vector<Pose2> groundTruthPath(double laps)
-{
-  std::vector<Pose2> path;
-  Pose2 p{-15.0, -8.0, 0.0};
-  path.push_back(p);
-  double travelled = 0.0;
-  const double sides[4] = {30.0, 16.0, 30.0, 16.0};
-  while (true) {
-    for (double side : sides) {
-      const int n = static_cast<int>(std::round(side / kStep));
-      for (int i = 0; i < n; i++) {
-        p.x += side / n * std::cos(p.yaw);
-        p.y += side / n * std::sin(p.yaw);
-        path.push_back(p);
-        travelled += side / n;
-        if (travelled >= 92.0 * laps) return path;
-      }
-      for (int i = 0; i < 6; i++) {
-        p.yaw += 15.0 * M_PI / 180.0;
-        path.push_back(p);
-      }
-    }
-  }
-}
+using namespace synthetic_hall;
 
 struct RunResult
 {
@@ -133,15 +37,7 @@ RunResult drive(const World & world, PoseGraphOptimizerConfig config, double yaw
 
   Pose2 odom = gt.front();
   for (size_t i = 0; i < gt.size(); i++) {
-    if (i > 0) {
-      // Integrate the true body-frame increment with a yaw bias.
-      const double c = std::cos(gt[i - 1].yaw), s = std::sin(gt[i - 1].yaw);
-      const double dx = gt[i].x - gt[i - 1].x, dy = gt[i].y - gt[i - 1].y;
-      const double fwd = c * dx + s * dy, left = -s * dx + c * dy;
-      odom.yaw += gt[i].yaw - gt[i - 1].yaw + yaw_drift_per_step;
-      odom.x += fwd * std::cos(odom.yaw) - left * std::sin(odom.yaw);
-      odom.y += fwd * std::sin(odom.yaw) + left * std::cos(odom.yaw);
-    }
+    if (i > 0) stepOdometry(odom, gt[i - 1], gt[i], yaw_drift_per_step);
     CloudWithPose cp;
     cp.cloud = world.scan(gt[i], rng);
     cp.pose.t = V3D(odom.x, odom.y, kSensorHeight);

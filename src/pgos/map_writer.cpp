@@ -9,6 +9,8 @@
 #include <string>
 #include <system_error>
 
+#include "nlohmann/json.hpp"
+
 void writeMergedMapPcd(
   const std::filesystem::path & path, const std::vector<KeyPoseWithCloud> & key_poses)
 {
@@ -64,4 +66,78 @@ void writeMergedMapPcd(
   std::error_code ec;
   std::filesystem::rename(tmp, path, ec);
   if (ec) fail("cannot rename " + tmp.string() + ": " + ec.message());
+}
+
+namespace
+{
+// sessions.json for `total` keyframes, or nothing when they are one run (see map_writer.h).
+void writeSessions(
+  const std::filesystem::path & dir, size_t total, const std::vector<size_t> & session_starts)
+{
+  nlohmann::ordered_json sessions = nlohmann::ordered_json::array();
+  for (size_t k = 0; k < session_starts.size(); k++) {
+    const size_t first = session_starts[k];
+    const size_t end = k + 1 < session_starts.size() ? session_starts[k + 1] : total;
+    if (end <= first) continue;  // a run that banked nothing
+    nlohmann::ordered_json s;
+    s["first"] = first;
+    s["count"] = end - first;
+    sessions.push_back(s);
+  }
+
+  const std::filesystem::path path = dir / kSessionsFile;
+  std::error_code ec;
+  if (sessions.size() <= 1) {
+    std::filesystem::remove(path, ec);
+    return;
+  }
+  nlohmann::ordered_json doc;
+  doc["version"] = 1;
+  doc["sessions"] = sessions;
+
+  const std::filesystem::path tmp = path.string() + ".tmp";
+  {
+    std::ofstream out(tmp, std::ios::trunc);
+    out << doc.dump(2) << "\n";
+    out.close();
+    if (!out) {
+      std::filesystem::remove(tmp, ec);
+      throw std::runtime_error("write failed: " + tmp.string());
+    }
+  }
+  std::filesystem::rename(tmp, path, ec);
+  if (ec) {
+    const std::string why = ec.message();
+    std::filesystem::remove(tmp, ec);
+    throw std::runtime_error("cannot rename " + tmp.string() + ": " + why);
+  }
+}
+}  // namespace
+
+void writeKeyframes(
+  const std::filesystem::path & dir, const std::vector<KeyPoseWithCloud> & key_poses,
+  const std::vector<size_t> & session_starts)
+{
+  const std::filesystem::path patches_dir = dir / "patches";
+  std::filesystem::create_directories(patches_dir);
+
+  {
+    // Opening it truncates an existing poses.txt.
+    std::ofstream txt_file(dir / "poses.txt");
+    for (size_t i = 0; i < key_poses.size(); i++) {
+      std::string patch_name = std::to_string(i) + ".pcd";
+      std::filesystem::path patch_path = patches_dir / patch_name;
+      pcl::io::savePCDFileBinary(patch_path.string(), *key_poses[i].body_cloud);
+      Eigen::Quaterniond q(key_poses[i].r_global);
+      V3D t = key_poses[i].t_global;
+      txt_file << patch_name << " " << t.x() << " " << t.y() << " " << t.z() << " " << q.w() << " "
+               << q.x() << " " << q.y() << " " << q.z() << std::endl;
+    }
+    txt_file.close();
+    // The patches throw by themselves (pcl); a full disk under poses.txt would otherwise leave a
+    // short list beside a complete patches/, which a resume reads as a smaller map.
+    if (!txt_file) throw std::runtime_error("write failed: " + (dir / "poses.txt").string());
+  }
+
+  writeSessions(dir, key_poses.size(), session_starts);
 }

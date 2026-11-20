@@ -33,7 +33,8 @@ find_package(pcl_conversions REQUIRED)
 find_package(message_filters REQUIRED)
 # pgo_node locates the clean_map executable it spawns through the package index.
 find_package(ament_index_cpp REQUIRED)
-# StartMapping / SaveMaps / ResetMapping (served) and ResetLIO (client).
+# StartMapping / ResumeMapping / SaveMaps / ResetMapping (served) and ResetLIO
+# (client).
 find_package(syncai_common REQUIRED)
 
 # GTSAM: source-built into /usr/local by the Dockerfile, no rosdep key (see
@@ -49,7 +50,8 @@ find_package(small_gicp REQUIRED)
 # (ros-humble-octomap): a source checkout would also build octovis and
 # dynamicEDT3D.
 find_package(octomap REQUIRED)
-# The map_cloud_file notice and map_clean.recipe.json. Header-only, from apt.
+# The map_cloud_file notice, map_clean.recipe.json and sessions.json.
+# Header-only, from apt.
 find_package(nlohmann_json 3.2.0 REQUIRED)
 
 set(SYNCAI_MAPPING_DEPS
@@ -104,9 +106,12 @@ target_link_libraries(apply_octomap_edits dynamic_removal_edits)
 # The pose graph is ROS-free, so the unit tests link it too.
 add_library(pgos STATIC
   src/pgos/commons.cpp
+  src/pgos/map_reader.cpp
   src/pgos/map_writer.cpp
   src/pgos/pose_graph_optimizer.cpp
+  src/pgos/registration.cpp
   src/pgos/scan_context.cpp
+  src/pgos/session_aligner.cpp
 )
 target_include_directories(pgos PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -120,6 +125,8 @@ target_link_libraries(pgos PUBLIC
   gtsam
   small_gicp::small_gicp
 )
+# sessions.json (map_writer / map_reader).
+target_link_libraries(pgos PRIVATE nlohmann_json::nlohmann_json)
 
 add_executable(pgo_node
   src/apps/pgo_node.cpp
@@ -162,6 +169,14 @@ if(BUILD_TESTING)
   target_link_libraries(test_loop_closure pgos)
   ament_add_gtest(test_map_writer test/test_map_writer.cpp)
   target_link_libraries(test_map_writer pgos)
+  ament_add_gtest(test_map_reader test/test_map_reader.cpp)
+  target_link_libraries(test_map_reader pgos)
+  # A resumed run on the same synthetic building: the saved map held fixed, the
+  # new run tied to it. Slow-ish.
+  ament_add_gtest(test_resume_mapping test/test_resume_mapping.cpp TIMEOUT 300)
+  target_link_libraries(test_resume_mapping pgos)
+  ament_add_gtest(test_session_aligner test/test_session_aligner.cpp TIMEOUT 300)
+  target_link_libraries(test_session_aligner pgos)
   ament_add_gtest(test_octomap_edits test/test_octomap_edits.cpp)
   target_link_libraries(test_octomap_edits dynamic_removal_edits)
   ament_add_gtest(test_recipe test/test_recipe.cpp)
