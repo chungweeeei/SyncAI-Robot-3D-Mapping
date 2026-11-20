@@ -227,6 +227,41 @@ TEST(SessionAligner, LookAlikePlaceIsRefusedWithoutAHint)
   expectLevel(hinted);
 }
 
+// A pose a localizer saved is a measurement: the robot is within centimetres of it, or it has
+// been moved since and the pose is stale. Its window is tight, with none of an estimate's slack.
+TEST(SessionAligner, MeasuredHintFindsThePoseItIsAt)
+{
+  const Pose2 truth{0.4, -7.6, 20.0 * M_PI / 180.0};
+  Stand stand = standAt(world(), truth);
+  hint(stand, Pose2{truth.x + 0.15, truth.y - 0.1, truth.yaw + 4.0 * M_PI / 180.0});
+  stand.request.hint_radius = 1.0;
+  stand.request.hint_yaw_deg = 20.0;
+  SessionAligner aligner(config());
+  const SessionAlignResult r = aligner.align(saved(), stand.request);
+  print("measured hint", r);
+  expectAligned(r, stand, truth);
+  expectLevel(r);
+}
+
+// The robot 2.5 m from where the file says. As an operator's estimate that is a good hint and
+// finds it; as a measurement it is a stale file, refused so that the caller searches instead.
+TEST(SessionAligner, StaleMeasuredHintIsRefused)
+{
+  const Pose2 truth{0.4, -7.6, 20.0 * M_PI / 180.0};
+  Stand stand = standAt(world(), truth);
+  hint(stand, Pose2{truth.x + 2.5, truth.y, truth.yaw});
+  SessionAligner aligner(config());
+  const SessionAlignResult estimate = aligner.align(saved(), stand.request);
+  print("2.5 m off, an estimate", estimate);
+  expectAligned(estimate, stand, truth);
+
+  stand.request.hint_radius = 1.0;
+  stand.request.hint_yaw_deg = 20.0;
+  const SessionAlignResult measured = aligner.align(saved(), stand.request);
+  print("2.5 m off, a measurement", measured);
+  EXPECT_FALSE(measured.success);
+}
+
 // An odometry frame whose up is 0.8 deg off the saved map's, as two static IMU initialisations
 // leave two runs of one robot. The alignment is the whole transform, tilt included: the run takes
 // the saved map's up. A rotation about z alone would leave it leaning by that much for good.

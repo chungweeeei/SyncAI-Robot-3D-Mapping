@@ -91,6 +91,14 @@ struct SessionAlignRequest
   bool use_hint = false;
   V3D hint_position = V3D::Zero();
   double hint_yaw = 0.0;
+  // > 0: the hint is a measurement (the pose a localizer last saved, last_pose_file.h), not an
+  // operator's estimate, and this is how far the robot may be from it (m, deg): the candidates
+  // lie within them and so must the answer, with none of the coarse stage's slack. Tight on
+  // purpose. Such a pose is either right to centimetres or stale (the robot was moved since),
+  // and a stale one must fail here and be searched for, not register at a place that happens to
+  // look like where the robot now stands. <= 0: the config's hint_radius / hint_yaw_deg.
+  double hint_radius = 0.0;
+  double hint_yaw_deg = 0.0;
 };
 
 // One registered candidate, for the log.

@@ -28,6 +28,7 @@
 #include "syncai_mapping/dynamic_removal/edits.hpp"
 #include "syncai_mapping/dynamic_removal/recipe.hpp"
 #include "syncai_mapping/pgo_node.hpp"
+#include "syncai_mapping/pgos/last_pose_file.h"
 #include "syncai_mapping/pgos/map_reader.h"
 #include "syncai_mapping/pgos/map_writer.h"
 
@@ -432,6 +433,28 @@ void PGONode::loadParameters()
     this->declare_parameter("resume_align_skip_scans", m_node_config.resume_align_skip_scans);
   m_node_config.resume_align_timeout_sec =
     this->declare_parameter("resume_align_timeout_sec", m_node_config.resume_align_timeout_sec);
+  m_node_config.resume_use_last_pose =
+    this->declare_parameter("resume_use_last_pose", m_node_config.resume_use_last_pose);
+  m_node_config.resume_last_pose_file =
+    this->declare_parameter("resume_last_pose_file", m_node_config.resume_last_pose_file);
+  m_node_config.resume_last_pose_radius_m =
+    this->declare_parameter("resume_last_pose_radius_m", m_node_config.resume_last_pose_radius_m);
+  m_node_config.resume_last_pose_yaw_deg =
+    this->declare_parameter("resume_last_pose_yaw_deg", m_node_config.resume_last_pose_yaw_deg);
+  if (m_node_config.resume_use_last_pose && !m_node_config.resume_last_pose_file.empty()) {
+    RCLCPP_INFO(
+      this->get_logger(),
+      "[PGONode] resume_mapping without a hint first tries the localizer's last pose (%s), "
+      "within %.1f m / %.0f deg of it",
+      m_node_config.resume_last_pose_file.c_str(), m_node_config.resume_last_pose_radius_m,
+      m_node_config.resume_last_pose_yaw_deg);
+  } else {
+    RCLCPP_INFO(
+      this->get_logger(),
+      "[PGONode] resume_mapping without a hint searches the whole saved map (%s)",
+      m_node_config.resume_use_last_pose ? "no resume_last_pose_file"
+                                         : "resume_use_last_pose is off");
+  }
   auto & ra = m_node_config.resume_aligner;
   ra.gicp_num_threads = m_pgo_config.loop_gicp_num_threads;
   ra.gicp_num_neighbors = m_pgo_config.loop_gicp_num_neighbors;
@@ -1265,6 +1288,41 @@ void PGONode::resumeMappingCB(
   align.use_hint = request->use_hint;
   align.hint_position = V3D(request->x, request->y, request->z);
   align.hint_yaw = request->yaw;
+  // No hint from the caller: where the nav session's localizer last had the robot, if that was
+  // on this map. The file names a map by its directory's name, as [map] name does.
+  bool from_last_pose = false;
+  if (
+    !request->use_hint && m_node_config.resume_use_last_pose &&
+    !m_node_config.resume_last_pose_file.empty()) {
+    std::string why;
+    const std::string map_name = prior_dir.filename().string();
+    const auto last = readLastPoseFile(m_node_config.resume_last_pose_file, why);
+    if (!last) {
+      RCLCPP_INFO(
+        this->get_logger(), "[PGONode][%s] no last pose to start from (%s: %s)", tag,
+        m_node_config.resume_last_pose_file.c_str(), why.c_str());
+    } else if (last->map != map_name) {
+      RCLCPP_INFO(
+        this->get_logger(),
+        "[PGONode][%s] the localizer's last pose is on map '%s', not '%s': not used", tag,
+        last->map.c_str(), map_name.c_str());
+    } else {
+      from_last_pose = true;
+      align.use_hint = true;
+      // The body above the ground the file gives; z only picks the storey.
+      align.hint_position =
+        V3D(last->x, last->y, last->ground_z + m_node_config.map_clean.lidar_height);
+      align.hint_yaw = last->yaw;
+      align.hint_radius = m_node_config.resume_last_pose_radius_m;
+      align.hint_yaw_deg = m_node_config.resume_last_pose_yaw_deg;
+      RCLCPP_INFO(
+        this->get_logger(),
+        "[PGONode][%s] trying the localizer's last pose first: (%.2f, %.2f) yaw %.1f deg, saved "
+        "%s",
+        tag, last->x, last->y, last->yaw * 180.0 / M_PI,
+        last->saved_at.empty() ? "at an unknown time" : last->saved_at.c_str());
+    }
+  }
   // Not a refusal: the accumulation goes through the odometry, so a robot that moved is still
   // aligned correctly. But it was told to stand, and the IMU initialisation before these scans
   // could not see it move either.
@@ -1277,17 +1335,35 @@ void PGONode::resumeMappingCB(
   const double last_pair_time = pairs.back().pose.second;
   pairs.clear();
   SessionAligner aligner(m_node_config.resume_aligner);
-  const SessionAlignResult aligned = aligner.align(saved.key_poses, align);
   // Every registered candidate: what the alignment's gates are calibrated from.
-  for (const SessionAlignAttempt & a : aligned.attempts) {
-    RCLCPP_INFO(
+  auto logAttempts = [&](const SessionAlignResult & result) {
+    for (const SessionAlignAttempt & a : result.attempts) {
+      RCLCPP_INFO(
+        this->get_logger(),
+        "[PGONode][%s] candidate at (%.2f, %.2f, %.2f) yaw %.1f deg | coarse %.2f | overlap %.2f "
+        "inlier %.2f of scan %.2f fitness %.4f xy info %.3f tilt %.2f deg | %s%s",
+        tag, a.position.x(), a.position.y(), a.position.z(), a.yaw * 180.0 / M_PI, a.coarse_score,
+        a.registration.overlap_ratio, a.registration.inlier_ratio,
+        a.registration.source_inlier_ratio, a.registration.fitness, a.registration.xy_info_ratio,
+        a.tilt_residual_deg, a.passed ? "passed" : "rejected: ", a.reject_reason);
+    }
+  };
+  SessionAlignResult aligned = aligner.align(saved.key_poses, align);
+  logAttempts(aligned);
+  if (from_last_pose && !aligned.success) {
+    // Not a failure, unlike a caller's hint that does not register: nobody said the robot is
+    // there. It was driven in this session, or carried, after the file was written.
+    RCLCPP_WARN(
       this->get_logger(),
-      "[PGONode][%s] candidate at (%.2f, %.2f, %.2f) yaw %.1f deg | coarse %.2f | overlap %.2f "
-      "inlier %.2f of scan %.2f fitness %.4f xy info %.3f tilt %.2f deg | %s%s",
-      tag, a.position.x(), a.position.y(), a.position.z(), a.yaw * 180.0 / M_PI, a.coarse_score,
-      a.registration.overlap_ratio, a.registration.inlier_ratio, a.registration.source_inlier_ratio,
-      a.registration.fitness, a.registration.xy_info_ratio, a.tilt_residual_deg,
-      a.passed ? "passed" : "rejected: ", a.reject_reason);
+      "[PGONode][%s] the robot is not where the localizer last saved it (%s) Searching the "
+      "whole saved map.",
+      tag, aligned.message.c_str());
+    from_last_pose = false;
+    align.use_hint = false;
+    align.hint_radius = 0.0;
+    align.hint_yaw_deg = 0.0;
+    aligned = aligner.align(saved.key_poses, align);
+    logAttempts(aligned);
   }
   if (!aligned.success) {
     fail(aligned.message + " Nothing started.");
@@ -1320,8 +1396,9 @@ void PGONode::resumeMappingCB(
   publishStatus();
 
   response->success = true;
-  response->method = aligned.used_hint ? ResumeMapping::Response::METHOD_HINT
-                                       : ResumeMapping::Response::METHOD_GLOBAL;
+  response->method = from_last_pose      ? ResumeMapping::Response::METHOD_LAST_POSE
+                     : aligned.used_hint ? ResumeMapping::Response::METHOD_HINT
+                                         : ResumeMapping::Response::METHOD_GLOBAL;
   response->aligned_x = aligned.position.x();
   response->aligned_y = aligned.position.y();
   response->aligned_z = aligned.position.z();
@@ -1343,7 +1420,10 @@ void PGONode::resumeMappingCB(
     this->get_logger(),
     "[PGONode][%s] %s (%s, %zu candidates, overlap %.2f inlier %.2f fitness %.4f, the run's up "
     "turned %.2f deg onto the saved map's)",
-    tag, response->message.c_str(), aligned.used_hint ? "hint" : "global search",
+    tag, response->message.c_str(),
+    from_last_pose      ? "the localizer's last pose"
+    : aligned.used_hint ? "hint"
+                        : "global search",
     aligned.candidates, aligned.registration.overlap_ratio, aligned.registration.inlier_ratio,
     aligned.registration.fitness, aligned.tilt_residual_deg);
 }

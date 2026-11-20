@@ -95,6 +95,11 @@ SessionAlignResult SessionAligner::align(
     return result;
   }
   const double body_yaw = yawOf(request.r_body);
+  // A measured hint brings its own, tighter, window (SessionAlignRequest::hint_radius).
+  const bool measured_hint = request.use_hint && request.hint_radius > 0.0;
+  const double hint_radius = measured_hint ? request.hint_radius : m_config.hint_radius;
+  const double hint_yaw_window =
+    (measured_hint ? request.hint_yaw_deg : m_config.hint_yaw_deg) * M_PI / 180.0;
 
   // ---- Candidate positions ----
   //
@@ -131,7 +136,7 @@ SessionAlignResult SessionAligner::align(
     positions.push_back(at_hint);
   }
   for (const KeyPoseWithCloud & kp : prior) {
-    if (request.use_hint && !near_hint(kp.t_global, m_config.hint_radius)) continue;
+    if (request.use_hint && !near_hint(kp.t_global, hint_radius)) continue;
     bool kept = true;
     for (const V3D & p : positions)
       if ((p - kp.t_global).norm() < m_config.candidate_spacing) {
@@ -146,7 +151,7 @@ SessionAlignResult SessionAligner::align(
   const double step = std::max(m_config.yaw_step_deg, 1.0) * M_PI / 180.0;
   if (request.use_hint) {
     const double centre = request.hint_yaw - body_yaw;
-    const int n = static_cast<int>(std::floor(m_config.hint_yaw_deg * M_PI / 180.0 / step + 1e-9));
+    const int n = static_cast<int>(std::floor(hint_yaw_window / step + 1e-9));
     for (int k = -n; k <= n; k++) yaw_offsets.push_back(wrapAngle(centre + k * step));
   } else {
     const int n = std::max(1, static_cast<int>(std::round(2.0 * M_PI / step)));
@@ -159,7 +164,7 @@ SessionAlignResult SessionAligner::align(
   // KD-tree: positions x yaws x points is tens of millions of lookups on a large site.
   std::unordered_set<uint64_t> occupied;
   {
-    const double reach = request.use_hint ? m_config.hint_radius + m_config.target_radius : -1.0;
+    const double reach = request.use_hint ? hint_radius + m_config.target_radius : -1.0;
     CloudType::Ptr coarse_map(new CloudType);
     CloudType world;
     size_t since_voxel = 0;
@@ -308,9 +313,11 @@ SessionAlignResult SessionAligner::align(
     }
     if (ok && request.use_hint) {
       // Within reach of what was asked: a registration that walked off to another place is not
-      // an answer to this hint.
-      const double reach = m_config.hint_radius + kCoarseFactor * m_config.gates.max_corr_dist;
-      const double yaw_reach = m_config.hint_yaw_deg * M_PI / 180.0 + step;
+      // an answer to this hint. An estimate gets the coarse stage's reach on top of its window,
+      // a measurement nothing.
+      const double reach =
+        measured_hint ? hint_radius : hint_radius + kCoarseFactor * m_config.gates.max_corr_dist;
+      const double yaw_reach = measured_hint ? hint_yaw_window : hint_yaw_window + step;
       if (
         (attempt.position - request.hint_position).head<2>().norm() > reach ||
         std::abs(wrapAngle(attempt.yaw - request.hint_yaw)) > yaw_reach) {

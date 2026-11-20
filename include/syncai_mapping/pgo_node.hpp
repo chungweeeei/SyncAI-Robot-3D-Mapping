@@ -82,6 +82,16 @@ struct NodeConfig
   // The alignment itself (pgos/session_aligner.h). Its registration settings follow the loop_*
   // parameters; the rest are resume_* parameters.
   SessionAlignerConfig resume_aligner;
+  // A resume without a hint first tries the pose the nav session's localizer last saved
+  // (pgos/last_pose_file.h), when that file is for the map being resumed: the usual way here is
+  // "navigate on the map, switch to mapping, resume", and then the robot stands where that file
+  // says. "" = never (the launch sets the path; a node run bare has none). The robot must
+  // register within the radius / yaw of it, tighter than an operator's hint: a pose saved by a
+  // localizer is right to centimetres or it is stale, and a stale one goes on to the search.
+  bool resume_use_last_pose = true;
+  std::string resume_last_pose_file;
+  double resume_last_pose_radius_m = 1.0;
+  double resume_last_pose_yaw_deg = 20.0;
   // Post-save cleaning (see startMapClean). dynamic_removal::Params documents each parameter.
   bool map_clean_enabled = true;
   int map_clean_nice = 10;

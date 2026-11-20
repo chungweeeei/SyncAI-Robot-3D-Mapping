@@ -10,7 +10,8 @@ and PCL are far more mature there. Three executables:
   closure (small_gicp + `PlanarLoopFactor`), GTSAM iSAM2, the `map -> <robot_id>/pointlio_odom`
   TF, and the `start_mapping` / `resume_mapping` / `save_maps` / `reset_mapping` services plus
   `mapping_status`. `resume_mapping` loads a saved map (`pgos/map_reader`), finds the robot in it
-  (`pgos/session_aligner`) and maps on in its frame, with the saved keyframes held as constants
+  (`pgos/session_aligner`: near the caller's hint, else near the pose `syncai_localizer` last
+  saved on that map, `pgos/last_pose_file`, else by searching) and maps on in its frame, with the saved keyframes held as constants
   (`PoseGraphOptimizer::loadPrior`): nothing may ever write a loaded keyframe's pose, because
   waypoints, `keepout.json` and `octomap_edits.json` live in that frame. A resumed run is saved
   to another directory, with `sessions.json` beside `poses.txt` naming where each run begins.

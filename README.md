@@ -314,6 +314,8 @@ following, tens of seconds on a large map:
    `resume_candidate_spacing_m`) over a full yaw sweep. Each is scored cheaply, the best
    `resume_max_registrations` distinct ones are registered coarse to fine against the saved
    keyframes within `resume_target_radius_m` of them, and the best that passes its gates wins.
+   **Without a hint, the pose the nav session's localizer last saved is tried first** (see
+   below).
 5. **Run**: `MAPPING`, the saved keyframes at indices `[0, P)` and the run's own after them.
 
 A failure of 2-4 leaves the node `IDLE` with nothing loaded. After step 2 pointlio has been reset
@@ -346,6 +348,22 @@ all the same, which is harmless while idle.
   against a saved keyframe logs its `registered dz`. `resume_loop_z_sigma_m > 0` makes such a
   loop also hold its keyframe's height (`HeightPriorFactor`); it is off, because on that replay
   the six such loops' dz scattered by about 1.5 cm, the size of what they would correct.
+- **Without a hint, the localizer's last pose comes first.** `syncai_localizer` saves its last
+  trusted pose during navigation (`config/state/<robot_id>/last_pose.json`: the map's directory
+  name and the lidar body's x / y / yaw in it, the parked pose included once the robot has stood
+  for 5 s). After "navigate on the map, switch to mapping, resume" the robot stands where that
+  file says, so the caller needs no pose. Used only when the file is for the map being resumed,
+  and never trusted by itself: the robot must register within `resume_last_pose_radius_m` /
+  `resume_last_pose_yaw_deg` of it (1 m / 20°, with none of a hint's slack), because a pose a
+  localizer saved is right to centimetres or it is stale. A robot driven in the mapping session
+  or carried since then fails that and **the whole map is searched instead**; unlike a caller's
+  hint, a stale file does not fail the call. The response's `method` is `METHOD_LAST_POSE` when
+  it was used. On the `resume_a` + `resume_b` replay: one registration and 5.8 s with the file,
+  8.7 s with a stale one (ten registrations more), the same pose to 0.3 mm either way.
+  `resume_use_last_pose: false` always searches. It is another package's file: its fields are
+  read in `pgos/last_pose_file`, and `mapping.launch.py` derives its path as
+  `localizer.launch.py` does. One risk it adds: a stale pose within a metre of a place that
+  looks like the one the robot now stands in registers there, and nothing asked a person.
 - **A place that looks like another one is refused, not guessed** (global search only): a second
   passing registration elsewhere, scoring within `resume_ambiguity_ratio` of the best. A hint
   settles it. A hint that does not register fails the call and is never retried as a global
@@ -357,8 +375,9 @@ all the same, which is harmless while idle.
   its sessions, so do not navigate on one. The clean does read it (see Cleaning map.pcd).
 
 `test/test_resume_mapping.cpp` (the frozen keyframes, the loops against them, the factors) and
-`test/test_session_aligner.cpp` (hint, global search, look-alike place, tilt) run on the synthetic
-hall; `test/test_map_reader.cpp` covers the directory round trip.
+`test/test_session_aligner.cpp` (hint, a measured hint and a stale one, global search, look-alike
+place, tilt) run on the synthetic hall; `test/test_map_reader.cpp` covers the directory round
+trip and `test/test_last_pose_file.cpp` the localizer's file.
 
 ### Threading
 
@@ -413,6 +432,9 @@ default silently.
 | `resume_max_tilt_deg` | `3.0` | deg, the most the run's up may differ from the saved map's (the alignment turns it onto the map's); above it the resume is refused as a registration gone wrong |
 | `resume_target_radius_m` / `resume_target_z_band_m` | `12.0` / `1.5` | m, saved keyframes this close to a candidate are its registration target; the z band is also the storey a hint's z selects |
 | `resume_hint_radius_m` / `resume_hint_yaw_deg` | `3.0` / `45.0` | candidates around a hint |
+| `resume_use_last_pose` | `true` | a resume without a hint first tries the localizer's last pose, when it is for the map being resumed; `false` = always search |
+| `resume_last_pose_file` | `""` | that file; set by the launch (`last_pose_file:=`, default `<workspace>/config/state/<robot_id>/last_pose.json`). `""` = none |
+| `resume_last_pose_radius_m` / `resume_last_pose_yaw_deg` | `1.0` / `20.0` | how far from that pose the robot may register; farther is a stale file and the map is searched |
 | `resume_candidate_spacing_m` / `resume_yaw_step_deg` | `1.0` / `15.0` | the global search's grid |
 | `resume_max_registrations` | `10` | **int**, candidates registered per alignment |
 | `resume_search_timeout_sec` | `10.0` | s, wall time for those registrations |
@@ -486,6 +508,7 @@ ros2 launch syncai_mapping mapping.launch.py                                    
 ros2 launch syncai_mapping mapping.launch.py system_config:=/path/to/robot01.ini
 ros2 launch syncai_mapping mapping.launch.py map_cloud_dir:=/dev/shm/syncai_pgo   # /<robot_id> is appended
 ros2 launch syncai_mapping mapping.launch.py start_on_launch:=true                # bag replay
+ros2 launch syncai_mapping mapping.launch.py last_pose_file:=/path/to/last_pose.json   # the localizer's, for resume_mapping
 ```
 
 This starts no LIO: run `syncai_pointlio` first. In the mapping session it is the second pane of
@@ -499,7 +522,7 @@ ros2 service call /<robot_id>/pgo/save_maps syncai_common/srv/SaveMaps \
   "{file_path: '/home/syncrobotic/robot_ws/map/<name>', save_patches: true, octomap: 1}"   # directory must exist; 1 = build the 3D map
 ros2 service call /<robot_id>/pgo/reset_mapping syncai_common/srv/ResetMapping "{reset_lio: true}"   # robot still
 # Resume a saved map (robot still, inside it), then save under ANOTHER name. Without use_hint the
-# saved map is searched for the robot.
+# localizer's last pose on that map is tried, then the saved map is searched for the robot.
 ros2 service call /<robot_id>/pgo/resume_mapping syncai_common/srv/ResumeMapping \
   "{map_path: '/home/syncrobotic/robot_ws/map/<name>', reset_lio: true, use_hint: true, x: 1.0, y: 2.0, z: 0.0, yaw: 0.0}"
 ```

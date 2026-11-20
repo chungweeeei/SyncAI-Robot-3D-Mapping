@@ -115,6 +115,7 @@ target_link_libraries(apply_octomap_edits dynamic_removal_edits)
 # The pose graph is ROS-free, so the unit tests link it too.
 add_library(pgos STATIC
   src/pgos/commons.cpp
+  src/pgos/last_pose_file.cpp
   src/pgos/map_reader.cpp
   src/pgos/map_writer.cpp
   src/pgos/pose_graph_optimizer.cpp
@@ -135,6 +136,8 @@ target_link_libraries(pgos PUBLIC
   small_gicp::small_gicp
   map_sessions
 )
+# The localizer's last pose file (last_pose_file).
+target_link_libraries(pgos PRIVATE nlohmann_json::nlohmann_json)
 
 add_executable(pgo_node
   src/apps/pgo_node.cpp
@@ -177,6 +180,8 @@ if(BUILD_TESTING)
   target_link_libraries(test_loop_closure pgos)
   ament_add_gtest(test_map_writer test/test_map_writer.cpp)
   target_link_libraries(test_map_writer pgos)
+  ament_add_gtest(test_last_pose_file test/test_last_pose_file.cpp)
+  target_link_libraries(test_last_pose_file pgos)
   ament_add_gtest(test_map_reader test/test_map_reader.cpp)
   target_link_libraries(test_map_reader pgos)
   # A resumed run on the same synthetic building: the saved map held fixed, the
