@@ -206,7 +206,8 @@ void PGONode::clearMapCloudDir()
 
 // Keep the newest two PCDs by seq and delete the rest and any stray .tmp. Two: the backend may be
 // acting on the notice one behind the latest. Sorted by seq, not "seq - 2", because the empty
-// notice also consumes a seq.
+// notice also consumes a seq. The saved map's file is not among them: every notice of the run
+// names it, and only the end of the run (clearMapCloudDir) removes it.
 void PGONode::pruneMapCloudFiles()
 {
   std::vector<std::pair<uint64_t, std::filesystem::path>> pcds;
@@ -219,6 +220,7 @@ void PGONode::pruneMapCloudFiles()
       continue;
     }
     const std::string stem = entry.path().stem().string();  // map_cloud_<seq>
+    if (stem.rfind("map_cloud_prior_", 0) == 0) continue;
     try {
       pcds.emplace_back(std::stoull(stem.substr(std::string("map_cloud_").size())), entry.path());
     } catch (const std::exception &) {
@@ -234,19 +236,25 @@ void PGONode::pruneMapCloudFiles()
 }
 
 // The notice the backend parses (field order fixed by ordered_json):
-//   seq       monotonic within this process, informational (restarts at 1)
-//   path      absolute path of the PCD, "" when the map is empty
-//   points    point count after the voxel filter, 0 when empty
-//   frame_id  map_frame: the points are already global
-//   stamp     the keyframe's time, as in the PointCloud2 header
+//   seq           monotonic within this process, informational (restarts at 1)
+//   path          absolute path of the PCD, "" when the map is empty
+//   points        point count after the voxel filter, 0 when empty
+//   prior_path    a resumed run's saved map, as its own PCD; "" for a run begun empty. The same
+//                 file on every notice of the run, so a reader can skip it once read. `path`
+//                 then holds only what this run added.
+//   prior_points  its point count, 0 with no prior_path
+//   frame_id      map_frame: the points are already global
+//   stamp         the keyframe's time, as in the PointCloud2 header
 std::string PGONode::mapCloudNoticeJson(
-  uint64_t seq, const std::string & path, size_t points,
-  const builtin_interfaces::msg::Time & time) const
+  uint64_t seq, const std::string & path, size_t points, const std::string & prior_path,
+  size_t prior_points, const builtin_interfaces::msg::Time & time) const
 {
   nlohmann::ordered_json j;
   j["seq"] = seq;
   j["path"] = path;
   j["points"] = points;
+  j["prior_path"] = prior_path;
+  j["prior_points"] = prior_points;
   j["frame_id"] = m_node_config.map_frame;
   j["stamp"]["sec"] = time.sec;
   j["stamp"]["nanosec"] = time.nanosec;
@@ -255,33 +263,27 @@ std::string PGONode::mapCloudNoticeJson(
 }
 
 void PGONode::publishMapCloudNotice(
-  uint64_t seq, const std::string & path, size_t points, const builtin_interfaces::msg::Time & time)
+  uint64_t seq, const std::string & path, size_t points, const std::string & prior_path,
+  size_t prior_points, const builtin_interfaces::msg::Time & time)
 {
   std_msgs::msg::String msg;
-  msg.data = mapCloudNoticeJson(seq, path, points, time);
+  msg.data = mapCloudNoticeJson(seq, path, points, prior_path, prior_points, time);
   m_map_cloud_file_pub->publish(msg);
 }
 
-// Write `map_cloud_<seq>.pcd` via .tmp + rename and announce it. Every failure is caught here: an
-// exception escaping the worker thread is std::terminate. savePCDFileBinary throws on an empty
-// cloud and on a failed write (ENOSPC included), so the empty case is handled first.
-void PGONode::writeAndAnnounceMapCloud(
-  const CloudType & merged, uint64_t seq, const builtin_interfaces::msg::Time & time)
+// Every failure is caught here: an exception escaping the worker thread is std::terminate.
+// savePCDFileBinary throws on an empty cloud and on a failed write (ENOSPC included), so callers
+// handle the empty case first.
+bool PGONode::writeMapCloudFile(const CloudType & cloud, const std::filesystem::path & final_path)
 {
-  if (merged.empty()) {
-    publishMapCloudNotice(seq, "", 0, time);
-    return;
-  }
-  const std::filesystem::path final_path =
-    std::filesystem::path(m_map_cloud_dir) / ("map_cloud_" + std::to_string(seq) + ".pcd");
   const std::filesystem::path tmp_path = final_path.string() + ".tmp";
+  bool ok = false;
   try {
-    if (pcl::io::savePCDFileBinary(tmp_path.string(), merged) != 0) {
+    if (pcl::io::savePCDFileBinary(tmp_path.string(), cloud) != 0) {
       throw std::runtime_error("savePCDFileBinary returned non-zero");
     }
     std::filesystem::rename(tmp_path, final_path);  // throws filesystem_error
-    publishMapCloudNotice(seq, final_path.string(), merged.size(), time);
-    pruneMapCloudFiles();
+    ok = true;
   } catch (const pcl::IOException & e) {
     RCLCPP_ERROR(
       this->get_logger(), "[PGONode] map_cloud file hand-off failed writing %s: %s",
@@ -295,6 +297,24 @@ void PGONode::writeAndAnnounceMapCloud(
   }
   std::error_code ec;
   std::filesystem::remove(tmp_path, ec);
+  return ok;
+}
+
+// Write `map_cloud_<seq>.pcd` and announce it beside the saved map's file, if the run has one.
+// Runs on the merge worker, which owns the m_prior_cloud_* fields.
+void PGONode::writeAndAnnounceMapCloud(
+  const CloudType & merged, uint64_t seq, const builtin_interfaces::msg::Time & time)
+{
+  if (merged.empty()) {
+    publishMapCloudNotice(seq, "", 0, m_prior_cloud_path, m_prior_cloud_points, time);
+    return;
+  }
+  const std::filesystem::path final_path =
+    std::filesystem::path(m_map_cloud_dir) / ("map_cloud_" + std::to_string(seq) + ".pcd");
+  if (!writeMapCloudFile(merged, final_path)) return;
+  publishMapCloudNotice(
+    seq, final_path.string(), merged.size(), m_prior_cloud_path, m_prior_cloud_points, time);
+  pruneMapCloudFiles();
 }
 
 // Fed by params/mapping_params.yaml plus the launch's robot_id-dependent overrides. A missing key
@@ -845,15 +865,23 @@ void PGONode::publishMapCloud(builtin_interfaces::msg::Time & time)
   // Snapshot by value under m_pgo_mutex. Cloud Ptrs are shared safely: a keyframe's cloud is
   // never written after insertion. (Not getSubMap(), which reads keyPoses live.)
   std::vector<KeyPoseWithCloud> snapshot = m_pgo->keyPoses();
+  const size_t prior_count = m_pgo->priorCount();
   const uint64_t seq = ++m_map_cloud_seq;
-  m_map_cloud_thread =
-    std::thread(&PGONode::mergeAndPublishMapCloud, this, std::move(snapshot), time, seq);
+  m_map_cloud_thread = std::thread(
+    &PGONode::mergeAndPublishMapCloud, this, std::move(snapshot), prior_count, time, seq);
 }
 
 // Runs on m_map_cloud_thread: late in a run this takes hundreds of ms, and the timer's TF
 // broadcast must not gap for that long.
+//
+// A resumed run is handed off in two halves: the saved map (the first prior_count keyframes) and
+// what this run added. The console draws them apart, so an operator can see what the run has
+// covered and catch a resume that landed off the saved map, as a wall drawn twice. The saved
+// half is merged and written once per run: its keyframes are frozen, so it cannot change, and a
+// large saved map is then not re-sent with every keyframe. rviz's PointCloud2 stays whole.
 void PGONode::mergeAndPublishMapCloud(
-  std::vector<KeyPoseWithCloud> snapshot, builtin_interfaces::msg::Time time, uint64_t seq)
+  std::vector<KeyPoseWithCloud> snapshot, size_t prior_count, builtin_interfaces::msg::Time time,
+  uint64_t seq)
 {
   // Stacked from the per-keyframe previews, already at map_cloud_resolution, and re-voxelised
   // whenever the stack passes kMergeVoxelEvery points: the merge stays the size of the place, not
@@ -871,31 +899,56 @@ void PGONode::mergeAndPublishMapCloud(
     cloud = out;
   };
 
-  CloudType::Ptr merged(new CloudType);
-  CloudType world_cloud;
-  size_t since_voxel = 0;
-  for (const auto & kp : snapshot) {
-    const CloudType::Ptr & src = kp.preview_cloud ? kp.preview_cloud : kp.body_cloud;
-    pcl::transformPointCloud(*src, world_cloud, kp.t_global, Eigen::Quaterniond(kp.r_global));
-    *merged += world_cloud;
-    since_voxel += world_cloud.size();
-    if (res > 0 && since_voxel >= kMergeVoxelEvery) {
-      voxelize(merged);
-      since_voxel = 0;
+  auto mergeKeyframes = [&](size_t begin, size_t end) {
+    CloudType::Ptr merged(new CloudType);
+    CloudType world_cloud;
+    size_t since_voxel = 0;
+    for (size_t i = begin; i < end; i++) {
+      const KeyPoseWithCloud & kp = snapshot[i];
+      const CloudType::Ptr & src = kp.preview_cloud ? kp.preview_cloud : kp.body_cloud;
+      pcl::transformPointCloud(*src, world_cloud, kp.t_global, Eigen::Quaterniond(kp.r_global));
+      *merged += world_cloud;
+      since_voxel += world_cloud.size();
+      if (res > 0 && since_voxel >= kMergeVoxelEvery) {
+        voxelize(merged);
+        since_voxel = 0;
+      }
     }
-  }
-  if (res > 0 && since_voxel > 0) voxelize(merged);
+    if (res > 0 && since_voxel > 0) voxelize(merged);
+    return merged;
+  };
+
+  const size_t prior = std::min(prior_count, snapshot.size());
+  if (prior > 0 && !m_prior_merged) m_prior_merged = mergeKeyframes(0, prior);
+  CloudType::Ptr merged = mergeKeyframes(prior, snapshot.size());
 
   // Already in the map frame. Subscriber counts re-read so a reader that left mid-merge costs
   // nothing.
   if (m_map_cloud_pub->get_subscription_count() > 0) {
     sensor_msgs::msg::PointCloud2 msg;
-    pcl::toROSMsg(*merged, msg);
+    if (m_prior_merged) {
+      CloudType whole = *m_prior_merged;
+      whole += *merged;
+      pcl::toROSMsg(whole, msg);
+    } else {
+      pcl::toROSMsg(*merged, msg);
+    }
     msg.header.frame_id = m_node_config.map_frame;
     msg.header.stamp = time;
     m_map_cloud_pub->publish(msg);
   }
   if (m_map_cloud_dir_ok && m_map_cloud_file_pub->get_subscription_count() > 0) {
+    // Named by the seq of the merge that wrote it, so a second resume in this process is a new
+    // path and a reader that skips a path it has read never keeps the first one's map. A failed
+    // write is tried again by the next merge.
+    if (m_prior_merged && !m_prior_merged->empty() && m_prior_cloud_path.empty()) {
+      const std::filesystem::path prior_path = std::filesystem::path(m_map_cloud_dir) /
+                                               ("map_cloud_prior_" + std::to_string(seq) + ".pcd");
+      if (writeMapCloudFile(*m_prior_merged, prior_path)) {
+        m_prior_cloud_path = prior_path.string();
+        m_prior_cloud_points = m_prior_merged->size();
+      }
+    }
     writeAndAnnounceMapCloud(*merged, seq, time);
   }
 
@@ -917,7 +970,7 @@ void PGONode::publishEmptyMapCloud(const builtin_interfaces::msg::Time & time)
   msg.header.stamp = time;
   m_map_cloud_pub->publish(msg);
 
-  publishMapCloudNotice(++m_map_cloud_seq, "", 0, time);
+  publishMapCloudNotice(++m_map_cloud_seq, "", 0, "", 0, time);
   clearMapCloudDir();
 }
 
@@ -937,6 +990,10 @@ void PGONode::stopRunLocked(const builtin_interfaces::msg::Time & now)
   if (m_map_cloud_thread.joinable()) m_map_cloud_thread.join();
   m_map_cloud_busy.store(false);
   m_last_map_cloud_time = 0.0;
+  // The worker is joined, so these are ours; the file itself goes with the empty notice below.
+  m_prior_merged.reset();
+  m_prior_cloud_path.clear();
+  m_prior_cloud_points = 0;
 
   // The constructor IS the reset (gtsam::ISAM2 has no clear, so a reset() method would be a second
   // definition of "empty"). After a save this also frees the keyframe clouds, a resumed map's

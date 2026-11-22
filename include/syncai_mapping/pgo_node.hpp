@@ -157,11 +157,13 @@ public:
   void clearMapCloudDir();
   void pruneMapCloudFiles();
   std::string mapCloudNoticeJson(
-    uint64_t seq, const std::string & path, size_t points,
-    const builtin_interfaces::msg::Time & time) const;
+    uint64_t seq, const std::string & path, size_t points, const std::string & prior_path,
+    size_t prior_points, const builtin_interfaces::msg::Time & time) const;
   void publishMapCloudNotice(
-    uint64_t seq, const std::string & path, size_t points,
-    const builtin_interfaces::msg::Time & time);
+    uint64_t seq, const std::string & path, size_t points, const std::string & prior_path,
+    size_t prior_points, const builtin_interfaces::msg::Time & time);
+  // .tmp + rename; false (logged) on any failure, never a throw: it runs on the merge worker.
+  bool writeMapCloudFile(const CloudType & cloud, const std::filesystem::path & final_path);
   void writeAndAnnounceMapCloud(
     const CloudType & merged, uint64_t seq, const builtin_interfaces::msg::Time & time);
 
@@ -207,7 +209,8 @@ public:
   // The "map so far" merge: claimed on the timer thread, run on the worker.
   void publishMapCloud(builtin_interfaces::msg::Time & time);
   void mergeAndPublishMapCloud(
-    std::vector<KeyPoseWithCloud> snapshot, builtin_interfaces::msg::Time time, uint64_t seq);
+    std::vector<KeyPoseWithCloud> snapshot, size_t prior_count, builtin_interfaces::msg::Time time,
+    uint64_t seq);
   void publishEmptyMapCloud(const builtin_interfaces::msg::Time & time);
   void publishLoopMarkerDeleteAll();
 
@@ -279,6 +282,12 @@ private:
   uint64_t m_map_cloud_seq = 0;
   std::string m_map_cloud_dir;
   bool m_map_cloud_dir_ok = false;
+  // A resumed run's saved map, merged once and handed off as its own file (prior_path in the
+  // notice): its keyframes are frozen, so the merge cannot change during the run. Touched only by
+  // the merge worker, and by stopRunLocked after it has joined the worker.
+  CloudType::Ptr m_prior_merged;
+  std::string m_prior_cloud_path;
+  size_t m_prior_cloud_points = 0;
   rclcpp::Service<syncai_common::srv::SaveMaps>::SharedPtr m_save_map_srv;
   // mapping_status and its counters: mirrors of keyPoses().size() / historyPairs().size(), written
   // under m_pgo_mutex so publishStatus never needs the lock.

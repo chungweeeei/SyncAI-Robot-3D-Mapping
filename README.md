@@ -84,14 +84,20 @@ binary PCD to `<map_cloud_dir>/map_cloud_<seq>.pcd` (keeping the newest two) and
 notice:
 
 ```json
-{"seq":12,"path":"/dev/shm/syncai_pgo/robot01/map_cloud_12.pcd","points":1830412,"frame_id":"map","stamp":{"sec":1727,"nanosec":0}}
+{"seq":12,"path":"/dev/shm/syncai_pgo/robot01/map_cloud_12.pcd","points":1830412,"prior_path":"","prior_points":0,"frame_id":"map","stamp":{"sec":1727,"nanosec":0}}
 ```
 
 - `map_cloud_dir` is `/dev/shm/syncai_pgo/<robot_id>`. The backend can read it only if **both
   compose services run with `ipc: host`**.
 - Subscribe transient local, or a restarted backend misses the latest notice.
-- Start, resume, reset and a successful save publish an empty map (`"points":0,"path":""`).
-  Consumers must clear their view on it.
+- **A resumed run comes in two files.** `prior_path` names the saved map, merged once into
+  `map_cloud_prior_<seq>.pcd` (its keyframes are frozen, so it never changes during the run), and
+  `path` holds only what this run added. The console draws the two apart, so the operator sees
+  what the run has covered and a resume that landed off the saved map shows as a wall drawn twice.
+  Every notice of the run names the same `prior_path`: read it once. It is `""` for a run begun
+  empty. rviz's `map_cloud` stays the whole map.
+- Start, resume, reset and a successful save publish an empty map (`"points":0,"path":""`, and no
+  `prior_path`). Consumers must clear their view on it.
 - If the directory cannot be created, only the file output is disabled; the node keeps running.
 
 ### `save_maps`
