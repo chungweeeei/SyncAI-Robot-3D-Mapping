@@ -12,22 +12,27 @@
 #include <small_gicp/pcl/pcl_registration.hpp>
 
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "syncai_mapping/pgos/commons.h"
 #include "syncai_mapping/pgos/gravity_prior_factor.h"
+#include "syncai_mapping/pgos/planar_anchor_factor.h"
 #include "syncai_mapping/pgos/planar_loop_factor.h"
 #include "syncai_mapping/pgos/scan_context.h"
 
+// A keyframe of the run, or one loaded from a saved map (PoseGraphOptimizer::loadPrior). A loaded
+// one has only its global pose and its clouds: the LIO pose, stamp and path length were never
+// saved, keep the defaults below and are never read (see isPrior()).
 struct KeyPoseWithCloud
 {
-  M3D r_local;
-  V3D t_local;
-  M3D r_global;
-  V3D t_global;
-  double time;
-  // Path length (m) from the first keyframe, along the LIO poses.
-  double travelled;
+  M3D r_local = M3D::Identity();
+  V3D t_local = V3D::Zero();
+  M3D r_global = M3D::Identity();
+  V3D t_global = V3D::Zero();
+  double time = 0.0;
+  // Path length (m) from the run's first keyframe, along the LIO poses.
+  double travelled = 0.0;
   CloudType::Ptr body_cloud;
   // body_cloud voxelised to pgo_node's map_cloud_resolution at insertion, for the live merge, so
   // it never transforms and stacks the dense clouds. Body frame, so a loop never invalidates it.
@@ -52,6 +57,11 @@ struct LoopPair
   // (dx, dy, dyaw) of the corrected source relative to the target, world frame: the
   // PlanarLoopFactor measurement. r_offset / t_offset feed the 6-DOF BetweenFactor instead.
   V3D planar_meas;
+  // How far the registration moved the source keyframe in world z, before the planar projection
+  // dropped it. Only logged within a run. Against a keyframe of a resumed map it is the height
+  // error between the two runs, the one thing a planar loop cannot take out (see
+  // resume_loop_z_sigma_m).
+  double registered_dz = 0.0;
 };
 
 struct PoseGraphOptimizerConfig
@@ -137,6 +147,26 @@ struct PoseGraphOptimizerConfig
   bool loop_sc_enabled = false;
   double loop_sc_max_range = 20.0;  // m, descriptor radius
   double loop_sc_dist_tresh = 0.2;  // cosine distance, lower = stricter
+
+  // ---- A resumed run (loadPrior) only ----
+  //
+  // The run's first keyframe is held where the alignment put it: world x / y, yaw and z, each
+  // with its own sigma. Not the loop sigmas above: those are weights against the odometry chain,
+  // while this is the accuracy of one registration and the only thing fixing the run's gauge.
+  // Loose, a residual between two new keyframes swings the whole run about its start (a degree
+  // is 0.9 m at 50 m). Not robustified either: if the alignment is wrong, the loops against the
+  // saved map must fail their drift gate in the log, not quietly re-anchor the run.
+  double resume_anchor_xy_sigma_m = 0.02;
+  double resume_anchor_yaw_sigma_deg = 0.2;
+  double resume_anchor_z_sigma_m = 0.02;
+  // World-z sigma (m) of a loop against a saved keyframe; <= 0 = off, such a loop is planar like
+  // any other. The two runs level themselves from separate IMU initialisations; the alignment
+  // takes that tilt out (loadPrior), to the accuracy of one registration, and what is left of it
+  // tilts the new run about its start (0.2 cm per metre at 0.1 deg), which planar loops never
+  // take out. On, every such loop also holds its source keyframe at the height the registration
+  // found. Off until the registered dz (logged for every such loop) has been seen to be clean
+  // enough to be trusted: z is where the fork's loops went wrong.
+  double resume_loop_z_sigma_m = 0.0;
 };
 
 // One loop candidate's outcome, for pgo_node's log (filled for every candidate, to calibrate).
@@ -162,6 +192,38 @@ class PoseGraphOptimizer
 {
 public:
   PoseGraphOptimizer(const PoseGraphOptimizerConfig & config);
+
+  /**
+   * Resume a saved map: its keyframes (map_reader.h) become keyframes [0, P) of this optimizer,
+   * and the run's own follow from index P. Only on a fresh optimizer, before any addKeyPose().
+   *
+   * The loaded keyframes are CONSTANTS. They are never given to iSAM2 (gtsam keys stay the
+   * keyframe indices, so the graph's keys begin at P), no estimate is ever copied back onto them,
+   * and nothing in this class writes their poses: the saved map's frame is this run's map frame,
+   * bit for bit. "Frozen" as tight priors on real variables would be a property of the sigmas.
+   *
+   * What ties the run to them:
+   *  - r_offset / t_offset, the map <- odom transform the session alignment found
+   *    (session_aligner.h). Not only a rotation about z: the two runs level themselves a
+   *    fraction of a degree apart, and r_offset carries that. The gravity anchor of every
+   *    keyframe of the run then holds it to the SAVED MAP's up, r_offset^T e_z in the LIO's
+   *    frame, not to the LIO's own.
+   *  - the run's first keyframe, anchored at its pose through that offset (resume_anchor_*);
+   *  - every loop against a loaded keyframe, a unary factor on its source (smoothAndUpdate).
+   *
+   * session_starts: the first keyframe of each run already in the saved map (SavedMap), so a
+   * submap never spans two runs. The run begun here is appended to it.
+   */
+  void loadPrior(
+    std::vector<KeyPoseWithCloud> && prior, const std::vector<size_t> & session_starts,
+    const M3D & r_offset, const V3D & t_offset);
+  // Keyframes loaded by loadPrior(); 0 for a run begun empty.
+  size_t priorCount() const { return m_prior_count; }
+  bool isPrior(size_t idx) const { return idx < m_prior_count; }
+  // First keyframe of every run in keyPoses(), ascending: the loaded map's, then this run's (the
+  // last entry, which is keyPoses().size() until the run has a keyframe). {0} for a run begun
+  // empty. What writeKeyframes() takes.
+  const std::vector<size_t> & sessionStarts() const { return m_session_starts; }
 
   bool isKeyPose(const PoseWithTime & pose);
 
@@ -208,13 +270,30 @@ private:
     M4D & correction);
   LoopPair makeLoopPair(size_t cur_idx, size_t loop_idx, const M4D & correction, double score);
   gtsam::SharedNoiseModel robustify(const gtsam::SharedNoiseModel & model) const;
+  // Path (m) the run has driven between `target` and `cur`, what the drift gate scales with. A
+  // loaded keyframe has no place on this run's path: the drift against it is whatever the run
+  // has accumulated since its alignment, so the whole of cur.travelled.
+  double pathSince(const KeyPoseWithCloud & cur, size_t target) const;
+  // Whether `target` is old enough to close a loop with `cur` (loop_time_tresh). A loaded
+  // keyframe has no stamp and is from another run: always.
+  bool pastTimeGate(const KeyPoseWithCloud & cur, size_t target) const;
+  // [first, end) of the run keyframe `idx` belongs to.
+  std::pair<int, int> sessionRange(int idx) const;
+  void makeScanContext(KeyPoseWithCloud & item, const M3D & r) const;
 
   PoseGraphOptimizerConfig m_config;
   std::vector<KeyPoseWithCloud> m_key_poses;
+  size_t m_prior_count = 0;
+  std::vector<size_t> m_session_starts{0};
   std::vector<std::pair<size_t, size_t>> m_history_pairs;
   std::vector<LoopPair> m_cache_pairs;
   M3D m_r_offset;
   V3D m_t_offset;
+  // The map's up in the LIO's (odometry) frame: what a keyframe's tilt anchor is measured
+  // against. e_z for a run begun empty, whose map frame is the LIO's; a resumed run's is the
+  // saved map's, as its alignment found it (loadPrior). Fixed for the run, unlike m_r_offset,
+  // which follows the last keyframe through every loop.
+  V3D m_up_in_odom = V3D::UnitZ();
   std::shared_ptr<gtsam::ISAM2> m_isam2;
   gtsam::Values m_initial_values;
   gtsam::NonlinearFactorGraph m_graph;

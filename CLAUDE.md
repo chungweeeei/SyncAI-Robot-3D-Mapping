@@ -8,9 +8,17 @@ and PCL are far more mature there. Three executables:
 
 - `pgo_node`: pose graph over `syncai_pointlio`'s odometry and dense body clouds. Keyframes, loop
   closure (small_gicp + `PlanarLoopFactor`), GTSAM iSAM2, the `map -> <robot_id>/pointlio_odom`
-  TF, and the `start_mapping` / `save_maps` / `reset_mapping` services plus `mapping_status`.
+  TF, and the `start_mapping` / `resume_mapping` / `save_maps` / `reset_mapping` services plus
+  `mapping_status`. `resume_mapping` loads a saved map (`pgos/map_reader`), finds the robot in it
+  (`pgos/session_aligner`: near the caller's hint, else near the pose `syncai_localizer` last
+  saved on that map, `pgos/last_pose_file`, else by searching) and maps on in its frame, with the saved keyframes held as constants
+  (`PoseGraphOptimizer::loadPrior`): nothing may ever write a loaded keyframe's pose, because
+  waypoints, `keepout.json` and `octomap_edits.json` live in that frame. A resumed run is saved
+  to another directory, with `sessions.json` beside `poses.txt` naming where each run begins.
 - `clean_map` (`dynamic_removal/`): the detached post-save job `pgo_node` spawns; it ray-casts
-  the saved patches and rewrites `map.pcd` without people and one-off returns. With
+  the saved patches and rewrites `map.pcd` without people and one-off returns (a resumed map run
+  by run, from `sessions.json`, so that what arrived between two runs is not taken for a
+  person). With
   `map_clean_octomap` (default off) it also writes `octomap.bt` (free + occupied, built in the
   same misses pass; never-seen space is unknown, removed voxels are free only if a ray passed
   through them, hit floor-band voxels stay occupied against grazing rays, and enclosed gaps in the floor within
@@ -72,15 +80,15 @@ docker exec syncai-robot-3d-mapping bash -lc 'cd /workspace && colcon test --pac
   when mixed with PCL. It has no `<depend>` in `package.xml` on purpose.
 - PCL, Eigen, OctoMap and nlohmann/json come from apt (`ros-humble-pcl-ros`, `libeigen3-dev`,
   `ros-humble-octomap`, `nlohmann-json3-dev`). All JSON this package writes (the
-  `map_cloud_file` notice, `map_clean.recipe.json`) goes through `nlohmann::ordered_json`; do not
-  hand-format JSON again.
+  `map_cloud_file` notice, `map_clean.recipe.json`, `sessions.json`) goes through
+  `nlohmann::ordered_json`; do not hand-format JSON again.
 - `syncai_common` and `small_gicp` are colcon packages from `dependencies.repos`; keep those pins in
   step with the Workspace's `interface.repos` / `third-party.repos`.
 
 ## Real-robot safety
 
 The dev container uses the host network and `ROS_DOMAIN_ID=2`. `pgo_node`'s `start_mapping` /
-`reset_mapping` call `syncai_pointlio`'s `ResetLIO`, and it broadcasts the `map` TF. When replaying
+`resume_mapping` / `reset_mapping` call `syncai_pointlio`'s `ResetLIO`, and it broadcasts the `map` TF. When replaying
 bags or testing, `export ROS_DOMAIN_ID=77` so nothing reaches a real robot's graph.
 
 ## Conventions

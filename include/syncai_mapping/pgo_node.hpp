@@ -3,8 +3,8 @@
 
 // The ROS shell around the pose graph (pgos/pose_graph_optimizer.*): cloud+odom intake, the 50 ms
 // timer that feeds the graph and broadcasts map -> local_frame, the "map so far" merge worker and
-// its file hand-off, and the run services start_mapping / reset_mapping / save_maps, with the run
-// state latched on mapping_status.
+// its file hand-off, and the run services start_mapping / resume_mapping / reset_mapping /
+// save_maps, with the run state latched on mapping_status.
 //
 // The ROS surface (node pgo_node at /<robot_id>/pgo, its services, topics, TF, the
 // /dev/shm/syncai_pgo/<robot_id> hand-off and the save_maps layout) is a contract with the
@@ -19,6 +19,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -38,11 +39,13 @@
 #include "syncai_common/msg/mapping_status.hpp"
 #include "syncai_common/srv/reset_lio.hpp"
 #include "syncai_common/srv/reset_mapping.hpp"
+#include "syncai_common/srv/resume_mapping.hpp"
 #include "syncai_common/srv/save_maps.hpp"
 #include "syncai_common/srv/start_mapping.hpp"
 #include "syncai_mapping/dynamic_removal/remover.hpp"
 #include "syncai_mapping/pgos/commons.h"
 #include "syncai_mapping/pgos/pose_graph_optimizer.h"
+#include "syncai_mapping/pgos/session_aligner.h"
 #include "visualization_msgs/msg/marker.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
 
@@ -68,6 +71,27 @@ struct NodeConfig
   // Come up MAPPING instead of IDLE: the escape hatch for bag replays. False (the mapping
   // session's case): nothing reaches the graph until start_mapping.
   bool start_on_launch = false;
+  // resume_mapping: the scans its alignment is made from. The first resume_align_skip_scans pairs
+  // after the LIO reset are passed over (pointlio's first frames only seed its map and its filter
+  // is still settling), the next resume_align_scans are accumulated through their odometry poses
+  // into one cloud, and the whole wait, IMU initialisation included, gives up after
+  // resume_align_timeout_sec.
+  int resume_align_scans = 10;
+  int resume_align_skip_scans = 5;
+  double resume_align_timeout_sec = 15.0;
+  // The alignment itself (pgos/session_aligner.h). Its registration settings follow the loop_*
+  // parameters; the rest are resume_* parameters.
+  SessionAlignerConfig resume_aligner;
+  // A resume without a hint first tries the pose the nav session's localizer last saved
+  // (pgos/last_pose_file.h), when that file is for the map being resumed: the usual way here is
+  // "navigate on the map, switch to mapping, resume", and then the robot stands where that file
+  // says. "" = never (the launch sets the path; a node run bare has none). The robot must
+  // register within the radius / yaw of it, tighter than an operator's hint: a pose saved by a
+  // localizer is right to centimetres or it is stale, and a stale one goes on to the search.
+  bool resume_use_last_pose = true;
+  std::string resume_last_pose_file;
+  double resume_last_pose_radius_m = 1.0;
+  double resume_last_pose_yaw_deg = 20.0;
   // Post-save cleaning (see startMapClean). dynamic_removal::Params documents each parameter.
   bool map_clean_enabled = true;
   int map_clean_nice = 10;
@@ -105,6 +129,20 @@ struct NodeState
   std::atomic<uint8_t> phase{syncai_common::msg::MappingStatus::IDLE};
   std::atomic<double> accept_after_time{-1.0};
   std::atomic<double> last_seen_time{-1.0};
+
+  // resume_mapping's alignment scans: the one case where pairs are kept while RESETTING. The
+  // phase alone cannot gate them, since RESETTING begins before the LIO reset has said where the
+  // old stream ends: `collecting` is raised only once collect_after_time holds that boundary
+  // (the time is stored first). syncCB appends under message_mutex and wakes the service thread
+  // through collected_cv when collect_wanted pairs are in; the first collect_skip are dropped.
+  std::atomic<bool> collecting{false};
+  std::atomic<double> collect_after_time{-1.0};
+  size_t collect_skip = 0;
+  size_t collect_wanted = 0;
+  size_t collect_seen = 0;
+  double collect_last_time = -1.0;
+  std::vector<PendingPair> collected;
+  std::condition_variable collected_cv;
 };
 
 class PGONode : public rclcpp::Node
@@ -119,11 +157,13 @@ public:
   void clearMapCloudDir();
   void pruneMapCloudFiles();
   std::string mapCloudNoticeJson(
-    uint64_t seq, const std::string & path, size_t points,
-    const builtin_interfaces::msg::Time & time) const;
+    uint64_t seq, const std::string & path, size_t points, const std::string & prior_path,
+    size_t prior_points, const builtin_interfaces::msg::Time & time) const;
   void publishMapCloudNotice(
-    uint64_t seq, const std::string & path, size_t points,
-    const builtin_interfaces::msg::Time & time);
+    uint64_t seq, const std::string & path, size_t points, const std::string & prior_path,
+    size_t prior_points, const builtin_interfaces::msg::Time & time);
+  // .tmp + rename; false (logged) on any failure, never a throw: it runs on the merge worker.
+  bool writeMapCloudFile(const CloudType & cloud, const std::filesystem::path & final_path);
   void writeAndAnnounceMapCloud(
     const CloudType & merged, uint64_t seq, const builtin_interfaces::msg::Time & time);
 
@@ -169,15 +209,21 @@ public:
   // The "map so far" merge: claimed on the timer thread, run on the worker.
   void publishMapCloud(builtin_interfaces::msg::Time & time);
   void mergeAndPublishMapCloud(
-    std::vector<KeyPoseWithCloud> snapshot, builtin_interfaces::msg::Time time, uint64_t seq);
+    std::vector<KeyPoseWithCloud> snapshot, size_t prior_count, builtin_interfaces::msg::Time time,
+    uint64_t seq);
   void publishEmptyMapCloud(const builtin_interfaces::msg::Time & time);
   void publishLoopMarkerDeleteAll();
 
-  // start_mapping and reset_mapping share one MutuallyExclusive group (so they serialise) and
-  // block on the ResetLIO client; save_maps shares the timer's group.
+  // start_mapping, resume_mapping and reset_mapping share one MutuallyExclusive group (so they
+  // serialise) and block on the ResetLIO client; save_maps shares the timer's group.
   void startMappingCB(
     const std::shared_ptr<syncai_common::srv::StartMapping::Request> request,
     std::shared_ptr<syncai_common::srv::StartMapping::Response> response);
+  // IDLE -> MAPPING with a saved map loaded and the new run placed in its frame; see
+  // ResumeMapping.srv for the contract and README, "Resuming a saved map".
+  void resumeMappingCB(
+    const std::shared_ptr<syncai_common::srv::ResumeMapping::Request> request,
+    std::shared_ptr<syncai_common::srv::ResumeMapping::Response> response);
   void resetMappingCB(
     const std::shared_ptr<syncai_common::srv::ResetMapping::Request> request,
     std::shared_ptr<syncai_common::srv::ResetMapping::Response> response);
@@ -197,10 +243,21 @@ private:
   std::vector<MapCleanChild> m_map_clean_children;
   // The sequence start_mapping (required_phase IDLE) and reset_mapping (MAPPING) share: pause,
   // reset the LIO, rebuild the graph, resume. On false, `message` says why and the state is
-  // unchanged; on true the node is MAPPING.
+  // unchanged; on true the node is MAPPING. `dropped` counts the run's own keyframes, `unloaded`
+  // those of the saved map a resumed run held (only freed: they are on disk).
   bool beginRun(
     bool reset_lio, uint8_t required_phase, std::string & message, double & last_odom_time,
-    uint32_t & dropped);
+    uint32_t & dropped, uint32_t & unloaded);
+  // The ResetLIO round trip, shared by beginRun and resumeMappingCB: wait for the service, call
+  // it, wait for the answer. On false, `message` says why (ending in `kept`) and the LIO was not
+  // reset. Never called with m_pgo_mutex held.
+  bool resetLio(
+    const char * tag, const char * kept, std::string & message, double & last_odom_time);
+  // resume_mapping's scans (see NodeState::collecting): the pairs stamped after `boundary`, less
+  // the first few. Blocks until they are in or resume_align_timeout_sec has passed; false then.
+  // Never called with m_pgo_mutex held: the timer shares syncCB's callback group and takes that
+  // mutex for its whole body, so holding it here would keep every pair from arriving.
+  bool collectAlignmentPairs(double boundary, std::vector<PendingPair> & pairs);
   // Turn "a run" into "no run"; caller holds m_pgo_mutex. Joins the merge worker, replaces the
   // optimizer, empties the buffer and counters, publishes the empty map (clearing /dev/shm) and
   // deletes the loop markers. Does NOT touch phase: the caller stores IDLE or MAPPING.
@@ -225,6 +282,12 @@ private:
   uint64_t m_map_cloud_seq = 0;
   std::string m_map_cloud_dir;
   bool m_map_cloud_dir_ok = false;
+  // A resumed run's saved map, merged once and handed off as its own file (prior_path in the
+  // notice): its keyframes are frozen, so the merge cannot change during the run. Touched only by
+  // the merge worker, and by stopRunLocked after it has joined the worker.
+  CloudType::Ptr m_prior_merged;
+  std::string m_prior_cloud_path;
+  size_t m_prior_cloud_points = 0;
   rclcpp::Service<syncai_common::srv::SaveMaps>::SharedPtr m_save_map_srv;
   // mapping_status and its counters: mirrors of keyPoses().size() / historyPairs().size(), written
   // under m_pgo_mutex so publishStatus never needs the lock.
@@ -238,9 +301,14 @@ private:
   rclcpp::CallbackGroup::SharedPtr m_srv_cb_group;
   rclcpp::CallbackGroup::SharedPtr m_cli_cb_group;
   rclcpp::Service<syncai_common::srv::StartMapping>::SharedPtr m_start_srv;
+  rclcpp::Service<syncai_common::srv::ResumeMapping>::SharedPtr m_resume_srv;
   rclcpp::Service<syncai_common::srv::ResetMapping>::SharedPtr m_reset_srv;
   rclcpp::Client<syncai_common::srv::ResetLIO>::SharedPtr m_lio_reset_cli;
   std::atomic<bool> m_transitioning{false};
+  // The directory a resumed run's saved map was read from, empty for a run begun empty. A save
+  // into it is refused: save_maps empties patches/ before it writes, and those patches are the
+  // only copy of what this run was resumed from. Under m_pgo_mutex, like m_pgo.
+  std::filesystem::path m_prior_dir;
   // Guards m_pgo, which is REPLACED (not mutated) on start/reset/save, so readers must be excluded
   // too. Needed because main() runs a MultiThreadedExecutor. Held by:
   //
@@ -248,6 +316,8 @@ private:
   //   saveMapsCB   whole body (it serialises what a reset would destroy, then -> IDLE)
   //   beginRun     phase 1 (precondition + RESETTING store) and phase 3 -- NEVER while waiting
   //                on the LIO future, which would stall the TF broadcast for seconds
+  //   resumeMappingCB  the same two moments (the pause, and the swap to the loaded optimizer),
+  //                never across the load, the LIO reset, the scan collection or the alignment
   //
   // Every store to m_state.phase happens under it, which makes the precondition checks exact.
   std::mutex m_pgo_mutex;

@@ -73,6 +73,64 @@
     loop_sc_max_range: 20.0       # m, descriptor radius
     loop_sc_dist_tresh: 0.2       # descriptor distance; lower = stricter
 
+    # resume_mapping: a saved map loaded and held fixed, the new run placed in
+    # its frame. See README "Resuming a saved map". Every value below is a first
+    # guess, to be calibrated from the "[resumeMappingCB] candidate" lines.
+    #
+    # The alignment's scans: after the LIO reset the first resume_align_skip_scans
+    # pairs are passed over (pointlio is still settling), the next
+    # resume_align_scans are accumulated, and the whole wait gives up after
+    # resume_align_timeout_sec.
+    resume_align_scans: 10          # int
+    resume_align_skip_scans: 5      # int
+    resume_align_timeout_sec: 15.0
+    # The alignment registers with the loop_gicp_* / loop_submap_resolution /
+    # loop_inlier_dist / loop_min_overlap_ratio / loop_score_tresh values above;
+    # its own gates are stricter than a loop's, since it places the whole run.
+    resume_min_inlier_ratio: 0.75        # inliers / overlap points
+    resume_min_scan_inlier_ratio: 0.3    # inliers / all scan points
+    # Roll / pitch the registration asks for is kept: two runs level themselves
+    # a fraction of a degree apart (0.76 deg on robot01, 2026-11-20), and the
+    # new one takes the saved map's up. More of it than this refuses the resume
+    # as a registration gone wrong, deg.
+    resume_max_tilt_deg: 3.0
+    # A resume WITHOUT a hint first tries the pose the nav session's localizer
+    # last saved (config/state/<robot_id>/last_pose.json, the path set by the
+    # launch), when that file is for the map being resumed: after "navigate,
+    # switch to mapping, resume" the robot stands where it says. It must
+    # register within this of that pose (m, deg) -- tighter than a caller's
+    # hint, which is an estimate -- or the whole map is searched as without
+    # the file. false = always search.
+    resume_use_last_pose: true
+    resume_last_pose_radius_m: 1.0
+    resume_last_pose_yaw_deg: 20.0
+    # Saved keyframes within this of a candidate are its registration target, m;
+    # the z band also selects the storey a hint's z names.
+    resume_target_radius_m: 12.0
+    resume_target_z_band_m: 1.5
+    # With a hint: candidates within this of it, m / deg.
+    resume_hint_radius_m: 3.0
+    resume_hint_yaw_deg: 45.0
+    # Without: saved keyframe positions thinned to this spacing, over a yaw
+    # sweep in these steps; the best resume_max_registrations distinct ones are
+    # registered, within resume_search_timeout_sec.
+    resume_candidate_spacing_m: 1.0
+    resume_yaw_step_deg: 15.0
+    resume_max_registrations: 10    # int
+    resume_search_timeout_sec: 10.0
+    # A second place registering at least this well (relative to the best)
+    # refuses the search as ambiguous.
+    resume_ambiguity_ratio: 0.9
+    # How firmly the run's first keyframe is held where the alignment put it.
+    resume_anchor_xy_sigma_m: 0.02
+    resume_anchor_yaw_sigma_deg: 0.2
+    resume_anchor_z_sigma_m: 0.02
+    # World-z sigma of a loop against a saved keyframe, m. <= 0 = off: such a
+    # loop is planar like any other, and a run levelled a little differently
+    # from the saved map keeps its slope. Off until the "registered dz" in the
+    # loop log has been looked at on a replay.
+    resume_loop_z_sigma_m: 0.0
+
     # "Map so far" merge on pgo/map_cloud (rviz) and pgo/map_cloud_file (backend).
     map_cloud_resolution: 0.2   # voxel leaf (m) of the published merge
     map_cloud_pub_period: 3.0   # min seconds between publishes

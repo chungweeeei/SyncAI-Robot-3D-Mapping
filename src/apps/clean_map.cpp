@@ -287,7 +287,9 @@ int main(int argc, char ** argv)
         rc = 3;
       }
       std::cout << "[clean_map] DONE keyframes=" << m.keyframes << " skipped=" << m.skipped_patches
-                << " points=" << m.points << " dynamic_voxels=" << m.dynamic_voxels
+                << " points=" << m.points << " sessions=" << m.sessions
+                << " dynamic_voxels=" << m.dynamic_voxels
+                << " session_kept_voxels=" << m.session_kept_voxels
                 << " sparse_voxels=" << m.sparse_voxels
                 << " map_points_removed=" << m.map_points_removed
                 << " map_points_kept=" << m.map_points_kept << " clipped_rays=" << m.clipped_rays
@@ -297,6 +299,9 @@ int main(int argc, char ** argv)
                 << " octomap_floor_restored=" << m.octomap_floor_restored
                 << " octomap_floor_filled=" << m.octomap_floor_filled << " in " << m.elapsed_s
                 << " s" << std::endl;
+      if (!m.sessions_warning.empty()) {
+        std::cerr << "[clean_map] " << m.sessions_warning << std::endl;
+      }
       if (params.octomap && !m.octomap_written) {
         std::cerr << "[clean_map] map.pcd cleaned but no " << dr::kOctomapFile << ": "
                   << m.octomap_error << std::endl;

@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "syncai_mapping/dynamic_removal/edits.hpp"
+#include "syncai_mapping/pgos/sessions.h"
 
 namespace syncai_mapping::dynamic_removal
 {
@@ -169,10 +170,34 @@ struct Counts
   uint32_t hits = 0;
   uint32_t clipped = 0;
   uint32_t misses = 0;
+  // Where this voxel's per-run counts are (RunCounts); unused for one run.
+  uint32_t slot = 0;
   bool removed = false;
   bool on_floor = false;  // within floor_band of its local floor
+  // Seen through over all runs, kept because a later run saw it standing.
+  bool session_kept = false;
 };
 using CountMap = std::unordered_map<octomap::OcTreeKey, Counts, octomap::OcTreeKey::KeyHash>;
+
+// A resumed map's hits and misses per mapping run (sessions.json), beside the
+// totals in Counts: voxel `slot`, run `r` at slot * runs + r. The totals alone
+// cannot tell a person from a shelf that arrived between two runs: both are
+// hit by a few scans and seen through by many, and only the order differs --
+// the shelf's misses all come from before its first hit. Nothing is allocated
+// for a map of one run.
+struct RunCounts
+{
+  size_t runs = 1;
+  std::vector<uint32_t> hits, misses;
+  uint32_t slots = 0;
+
+  bool split() const { return runs > 1; }
+  uint32_t addSlot()
+  {
+    hits.resize((size_t(slots) + 1) * runs, 0);
+    return slots++;
+  }
+};
 
 fs::path tmpPath(const fs::path & dir, const char * name)
 {
@@ -358,18 +383,49 @@ bool cleanImpl(
   std::vector<FloorRef> floors;
   readPoses(poses_path, params.lidar_height, poses, floors);
 
+  // The mapping runs behind poses.txt: one, or a resumed map's sessions.json.
+  // A file that does not fit this poses.txt (readPoses skips a row it cannot
+  // parse, which shifts every index after it) is not used at all.
+  std::vector<size_t> run_starts = {0};
+  {
+    std::error_code ec;
+    std::string why;
+    if (
+      fs::exists(dir / kSessionsFile, ec) &&
+      !readSessions(dir / kSessionsFile, poses.size(), run_starts, why)) {
+      out.sessions_warning =
+        std::string(kSessionsFile) + " ignored (" + why + "); cleaned as one run";
+    }
+  }
+  RunCounts runs;
+  runs.runs = run_starts.size();
+  out.sessions = runs.runs;
+  auto runOf = [&](size_t pose_index) {
+    return static_cast<size_t>(
+             std::upper_bound(run_starts.begin(), run_starts.end(), pose_index) -
+             run_starts.begin()) -
+           1;
+  };
+
   // Key arithmetic and ray traversal, and with params.octomap the tree itself.
   // Not const: computeDiscreteUpdate uses scratch members.
   octomap::OcTree tree(params.voxel_size);
   const double band = params.floor_band, dyn_band = params.floor_band_dynamic,
                maxh = params.dynamic_max_height, rad = params.floor_radius;
   CountMap counts;
+  auto countsOf = [&](const octomap::OcTreeKey & k) -> Counts & {
+    const auto [it, fresh] = counts.try_emplace(k);
+    if (fresh && runs.split()) it->second.slot = runs.addSlot();
+    return it->second;
+  };
 
   // ---- Pass 1: hits ----
   //
   // The ray origin is the keyframe (IMU) pose, ~5 cm from the lidar's: under
   // one voxel, so the extrinsic is not applied.
-  for (const auto & p : poses) {
+  for (size_t i = 0; i < poses.size(); ++i) {
+    const PoseLine & p = poses[i];
+    const size_t run = runOf(i);
     pcl::PointCloud<pcl::PointXYZI> cloud;
     Eigen::Quaterniond q;
     Eigen::Vector3d t;
@@ -389,8 +445,12 @@ bool cleanImpl(
       octomap::OcTreeKey k;
       if (tree.coordToKeyChecked(w, k)) clipped_keys.insert(k);
     }
-    for (const auto & k : hit_keys) ++counts[k].hits;
-    for (const auto & k : clipped_keys) ++counts[k].clipped;
+    for (const auto & k : hit_keys) {
+      Counts & c = countsOf(k);
+      ++c.hits;
+      if (runs.split()) ++runs.hits[size_t(c.slot) * runs.runs + run];
+    }
+    for (const auto & k : clipped_keys) ++countsOf(k).clipped;
     out.clipped_rays += scan.clipped_ends.size();
     out.points += scan.endpoints.size() + scan.clipped_ends.size();
     ++out.keyframes;
@@ -419,7 +479,10 @@ bool cleanImpl(
     out.octomap_error = why;
   };
   size_t done = 0;
-  for (const auto & p : poses) {
+  runs.misses.assign(runs.hits.size(), 0);
+  for (size_t i = 0; i < poses.size(); ++i) {
+    const PoseLine & p = poses[i];
+    const size_t run = runOf(i);
     pcl::PointCloud<pcl::PointXYZI> cloud;
     Eigen::Quaterniond q;
     Eigen::Vector3d t;
@@ -430,7 +493,9 @@ bool cleanImpl(
         free_cells, occupied_cells);
       for (const auto & k : free_cells) {
         auto it = counts.find(k);
-        if (it != counts.end()) ++it->second.misses;
+        if (it == counts.end()) continue;
+        ++it->second.misses;
+        if (runs.split()) ++runs.misses[size_t(it->second.slot) * runs.runs + run];
       }
       if (building) {
         try {
@@ -519,14 +584,42 @@ bool cleanImpl(
   };
 
   // ---- Classify ----
+  auto seenThrough = [&](uint32_t hits, uint32_t misses) {
+    return params.dynamic_min_miss > 0 && hits > 0 && misses >= (uint32_t)params.dynamic_min_miss &&
+           misses >= params.dynamic_miss_ratio * hits;
+  };
+  // A resumed map: whether the voxel, seen through over all its runs, stands
+  // from some later run on -- hit there by enough scans not to be a one-off
+  // (the sparse rule's count) and not seen through by that run or any after
+  // it. Something that arrived between two runs does; a person does not, in
+  // whichever run they walked; something that left has no hit in a later run
+  // to stand on. Counting back from the last run, each step adds one more
+  // run's scans to both sides.
+  //
+  // What it cannot tell apart, like the rule within one run: a person who
+  // stood still for every scan a later run took of that place is a thing
+  // that arrived.
+  auto standsSinceALaterRun = [&](const Counts & c) {
+    const uint32_t enough = static_cast<uint32_t>(std::max(1, params.sparse_min_hits));
+    uint32_t hits = 0, misses = 0;
+    for (size_t r = runs.runs; r-- > 1;) {
+      hits += runs.hits[size_t(c.slot) * runs.runs + r];
+      misses += runs.misses[size_t(c.slot) * runs.runs + r];
+      if (hits >= enough && !seenThrough(hits, misses)) return true;
+    }
+    return false;
+  };
   for (auto & [key, c] : counts) {
     const octomap::point3d v = tree.keyToCoord(key);
     const double fz = localFloor(v.x(), v.y(), v.z());
     bool dynamic = false;
-    if (
-      params.dynamic_min_miss > 0 && c.hits > 0 && c.misses >= (uint32_t)params.dynamic_min_miss &&
-      c.misses >= params.dynamic_miss_ratio * c.hits) {
+    if (seenThrough(c.hits, c.misses)) {
       dynamic = !std::isnan(fz) && v.z() >= fz + dyn_band && v.z() <= fz + maxh;
+      if (dynamic && runs.split() && standsSinceALaterRun(c)) {
+        dynamic = false;
+        c.session_kept = true;
+        ++out.session_kept_voxels;
+      }
     }
     const bool on_floor = !std::isnan(fz) && std::fabs(v.z() - fz) <= band;
     c.on_floor = on_floor;
@@ -549,6 +642,10 @@ bool cleanImpl(
   // far floor points count misses along the floor for metres, and the
   // planner would find holes everywhere.
   //
+  // So is a voxel a later run put back (session_kept): the earlier runs'
+  // misses hold its log-odds at the clamp, which two hits do not lift over
+  // the threshold, and the planner would walk through what map.pcd shows.
+  //
   // Freed before pass 3 so the tree and the map cloud never coexist.
   if (building && progress && !progress("tree", 0, 0)) return false;
   if (building) {
@@ -558,9 +655,11 @@ bool cleanImpl(
       for (const auto & [key, c] : counts) {
         if (c.hits == 0) continue;
         if (!c.removed) {
-          if (!c.on_floor) continue;
-          const auto * node = tree.search(key);
-          if (node && !tree.isNodeOccupied(node)) ++out.octomap_floor_restored;
+          if (!c.on_floor && !c.session_kept) continue;
+          if (c.on_floor) {
+            const auto * node = tree.search(key);
+            if (node && !tree.isNodeOccupied(node)) ++out.octomap_floor_restored;
+          }
           tree.setNodeValue(key, occupied_log, true);
         } else if (c.misses > 0) {
           tree.setNodeValue(key, free_log, true);

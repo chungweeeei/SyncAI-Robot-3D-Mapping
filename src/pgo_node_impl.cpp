@@ -28,6 +28,8 @@
 #include "syncai_mapping/dynamic_removal/edits.hpp"
 #include "syncai_mapping/dynamic_removal/recipe.hpp"
 #include "syncai_mapping/pgo_node.hpp"
+#include "syncai_mapping/pgos/last_pose_file.h"
+#include "syncai_mapping/pgos/map_reader.h"
 #include "syncai_mapping/pgos/map_writer.h"
 
 extern char ** environ;
@@ -108,6 +110,12 @@ PGONode::PGONode() : Node("pgo_node")
     "start_mapping",
     std::bind(&PGONode::startMappingCB, this, std::placeholders::_1, std::placeholders::_2),
     rmw_qos_profile_services_default, m_srv_cb_group);
+  // And the resume: it pauses and resets as they do, and blocks far longer (the load, the scans,
+  // the alignment), which this group is for.
+  m_resume_srv = this->create_service<syncai_common::srv::ResumeMapping>(
+    "resume_mapping",
+    std::bind(&PGONode::resumeMappingCB, this, std::placeholders::_1, std::placeholders::_2),
+    rmw_qos_profile_services_default, m_srv_cb_group);
 
   m_lio_reset_cli = this->create_client<syncai_common::srv::ResetLIO>(
     m_node_config.lio_reset_service, rmw_qos_profile_services_default, m_cli_cb_group);
@@ -121,8 +129,8 @@ PGONode::PGONode() : Node("pgo_node")
   } else {
     RCLCPP_INFO(
       this->get_logger(),
-      "[PGONode] idle until start_mapping is called; pairs are dropped and only an identity "
-      "map -> %s is broadcast meanwhile",
+      "[PGONode] idle until start_mapping or resume_mapping is called; pairs are dropped and only "
+      "an identity map -> %s is broadcast meanwhile",
       m_node_config.local_frame.c_str());
   }
   publishStatus();
@@ -198,7 +206,8 @@ void PGONode::clearMapCloudDir()
 
 // Keep the newest two PCDs by seq and delete the rest and any stray .tmp. Two: the backend may be
 // acting on the notice one behind the latest. Sorted by seq, not "seq - 2", because the empty
-// notice also consumes a seq.
+// notice also consumes a seq. The saved map's file is not among them: every notice of the run
+// names it, and only the end of the run (clearMapCloudDir) removes it.
 void PGONode::pruneMapCloudFiles()
 {
   std::vector<std::pair<uint64_t, std::filesystem::path>> pcds;
@@ -211,6 +220,7 @@ void PGONode::pruneMapCloudFiles()
       continue;
     }
     const std::string stem = entry.path().stem().string();  // map_cloud_<seq>
+    if (stem.rfind("map_cloud_prior_", 0) == 0) continue;
     try {
       pcds.emplace_back(std::stoull(stem.substr(std::string("map_cloud_").size())), entry.path());
     } catch (const std::exception &) {
@@ -226,19 +236,25 @@ void PGONode::pruneMapCloudFiles()
 }
 
 // The notice the backend parses (field order fixed by ordered_json):
-//   seq       monotonic within this process, informational (restarts at 1)
-//   path      absolute path of the PCD, "" when the map is empty
-//   points    point count after the voxel filter, 0 when empty
-//   frame_id  map_frame: the points are already global
-//   stamp     the keyframe's time, as in the PointCloud2 header
+//   seq           monotonic within this process, informational (restarts at 1)
+//   path          absolute path of the PCD, "" when the map is empty
+//   points        point count after the voxel filter, 0 when empty
+//   prior_path    a resumed run's saved map, as its own PCD; "" for a run begun empty. The same
+//                 file on every notice of the run, so a reader can skip it once read. `path`
+//                 then holds only what this run added.
+//   prior_points  its point count, 0 with no prior_path
+//   frame_id      map_frame: the points are already global
+//   stamp         the keyframe's time, as in the PointCloud2 header
 std::string PGONode::mapCloudNoticeJson(
-  uint64_t seq, const std::string & path, size_t points,
-  const builtin_interfaces::msg::Time & time) const
+  uint64_t seq, const std::string & path, size_t points, const std::string & prior_path,
+  size_t prior_points, const builtin_interfaces::msg::Time & time) const
 {
   nlohmann::ordered_json j;
   j["seq"] = seq;
   j["path"] = path;
   j["points"] = points;
+  j["prior_path"] = prior_path;
+  j["prior_points"] = prior_points;
   j["frame_id"] = m_node_config.map_frame;
   j["stamp"]["sec"] = time.sec;
   j["stamp"]["nanosec"] = time.nanosec;
@@ -247,33 +263,27 @@ std::string PGONode::mapCloudNoticeJson(
 }
 
 void PGONode::publishMapCloudNotice(
-  uint64_t seq, const std::string & path, size_t points, const builtin_interfaces::msg::Time & time)
+  uint64_t seq, const std::string & path, size_t points, const std::string & prior_path,
+  size_t prior_points, const builtin_interfaces::msg::Time & time)
 {
   std_msgs::msg::String msg;
-  msg.data = mapCloudNoticeJson(seq, path, points, time);
+  msg.data = mapCloudNoticeJson(seq, path, points, prior_path, prior_points, time);
   m_map_cloud_file_pub->publish(msg);
 }
 
-// Write `map_cloud_<seq>.pcd` via .tmp + rename and announce it. Every failure is caught here: an
-// exception escaping the worker thread is std::terminate. savePCDFileBinary throws on an empty
-// cloud and on a failed write (ENOSPC included), so the empty case is handled first.
-void PGONode::writeAndAnnounceMapCloud(
-  const CloudType & merged, uint64_t seq, const builtin_interfaces::msg::Time & time)
+// Every failure is caught here: an exception escaping the worker thread is std::terminate.
+// savePCDFileBinary throws on an empty cloud and on a failed write (ENOSPC included), so callers
+// handle the empty case first.
+bool PGONode::writeMapCloudFile(const CloudType & cloud, const std::filesystem::path & final_path)
 {
-  if (merged.empty()) {
-    publishMapCloudNotice(seq, "", 0, time);
-    return;
-  }
-  const std::filesystem::path final_path =
-    std::filesystem::path(m_map_cloud_dir) / ("map_cloud_" + std::to_string(seq) + ".pcd");
   const std::filesystem::path tmp_path = final_path.string() + ".tmp";
+  bool ok = false;
   try {
-    if (pcl::io::savePCDFileBinary(tmp_path.string(), merged) != 0) {
+    if (pcl::io::savePCDFileBinary(tmp_path.string(), cloud) != 0) {
       throw std::runtime_error("savePCDFileBinary returned non-zero");
     }
     std::filesystem::rename(tmp_path, final_path);  // throws filesystem_error
-    publishMapCloudNotice(seq, final_path.string(), merged.size(), time);
-    pruneMapCloudFiles();
+    ok = true;
   } catch (const pcl::IOException & e) {
     RCLCPP_ERROR(
       this->get_logger(), "[PGONode] map_cloud file hand-off failed writing %s: %s",
@@ -287,6 +297,24 @@ void PGONode::writeAndAnnounceMapCloud(
   }
   std::error_code ec;
   std::filesystem::remove(tmp_path, ec);
+  return ok;
+}
+
+// Write `map_cloud_<seq>.pcd` and announce it beside the saved map's file, if the run has one.
+// Runs on the merge worker, which owns the m_prior_cloud_* fields.
+void PGONode::writeAndAnnounceMapCloud(
+  const CloudType & merged, uint64_t seq, const builtin_interfaces::msg::Time & time)
+{
+  if (merged.empty()) {
+    publishMapCloudNotice(seq, "", 0, m_prior_cloud_path, m_prior_cloud_points, time);
+    return;
+  }
+  const std::filesystem::path final_path =
+    std::filesystem::path(m_map_cloud_dir) / ("map_cloud_" + std::to_string(seq) + ".pcd");
+  if (!writeMapCloudFile(merged, final_path)) return;
+  publishMapCloudNotice(
+    seq, final_path.string(), merged.size(), m_prior_cloud_path, m_prior_cloud_points, time);
+  pruneMapCloudFiles();
 }
 
 // Fed by params/mapping_params.yaml plus the launch's robot_id-dependent overrides. A missing key
@@ -408,6 +436,83 @@ void PGONode::loadParameters()
     m_pgo_config.loop_sc_enabled ? "on" : "off", m_pgo_config.loop_sc_max_range,
     m_pgo_config.loop_sc_dist_tresh);
 
+  // resume_mapping. Ints: align_scans, align_skip_scans, max_registrations; the rest doubles.
+  // The alignment registers with the loops' GICP settings, voxel and distances, so the two are
+  // tuned as one; its inlier gate is its own (stricter, see SessionAlignerConfig).
+  m_pgo_config.resume_anchor_xy_sigma_m =
+    this->declare_parameter("resume_anchor_xy_sigma_m", m_pgo_config.resume_anchor_xy_sigma_m);
+  m_pgo_config.resume_anchor_yaw_sigma_deg = this->declare_parameter(
+    "resume_anchor_yaw_sigma_deg", m_pgo_config.resume_anchor_yaw_sigma_deg);
+  m_pgo_config.resume_anchor_z_sigma_m =
+    this->declare_parameter("resume_anchor_z_sigma_m", m_pgo_config.resume_anchor_z_sigma_m);
+  m_pgo_config.resume_loop_z_sigma_m =
+    this->declare_parameter("resume_loop_z_sigma_m", m_pgo_config.resume_loop_z_sigma_m);
+  m_node_config.resume_align_scans =
+    this->declare_parameter("resume_align_scans", m_node_config.resume_align_scans);
+  m_node_config.resume_align_skip_scans =
+    this->declare_parameter("resume_align_skip_scans", m_node_config.resume_align_skip_scans);
+  m_node_config.resume_align_timeout_sec =
+    this->declare_parameter("resume_align_timeout_sec", m_node_config.resume_align_timeout_sec);
+  m_node_config.resume_use_last_pose =
+    this->declare_parameter("resume_use_last_pose", m_node_config.resume_use_last_pose);
+  m_node_config.resume_last_pose_file =
+    this->declare_parameter("resume_last_pose_file", m_node_config.resume_last_pose_file);
+  m_node_config.resume_last_pose_radius_m =
+    this->declare_parameter("resume_last_pose_radius_m", m_node_config.resume_last_pose_radius_m);
+  m_node_config.resume_last_pose_yaw_deg =
+    this->declare_parameter("resume_last_pose_yaw_deg", m_node_config.resume_last_pose_yaw_deg);
+  if (m_node_config.resume_use_last_pose && !m_node_config.resume_last_pose_file.empty()) {
+    RCLCPP_INFO(
+      this->get_logger(),
+      "[PGONode] resume_mapping without a hint first tries the localizer's last pose (%s), "
+      "within %.1f m / %.0f deg of it",
+      m_node_config.resume_last_pose_file.c_str(), m_node_config.resume_last_pose_radius_m,
+      m_node_config.resume_last_pose_yaw_deg);
+  } else {
+    RCLCPP_INFO(
+      this->get_logger(),
+      "[PGONode] resume_mapping without a hint searches the whole saved map (%s)",
+      m_node_config.resume_use_last_pose ? "no resume_last_pose_file"
+                                         : "resume_use_last_pose is off");
+  }
+  auto & ra = m_node_config.resume_aligner;
+  ra.gicp_num_threads = m_pgo_config.loop_gicp_num_threads;
+  ra.gicp_num_neighbors = m_pgo_config.loop_gicp_num_neighbors;
+  ra.gates.resolution = m_pgo_config.loop_submap_resolution;
+  ra.gates.max_corr_dist = m_pgo_config.loop_gicp_max_corr_dist;
+  ra.gates.inlier_dist = m_pgo_config.loop_inlier_dist;
+  ra.gates.min_overlap_ratio = m_pgo_config.loop_min_overlap_ratio;
+  ra.gates.score_tresh = m_pgo_config.loop_score_tresh;
+  ra.gates.min_xy_info_ratio = m_pgo_config.loop_min_xy_info_ratio;
+  ra.gates.min_inlier_ratio =
+    this->declare_parameter("resume_min_inlier_ratio", ra.gates.min_inlier_ratio);
+  ra.min_source_inlier_ratio =
+    this->declare_parameter("resume_min_scan_inlier_ratio", ra.min_source_inlier_ratio);
+  ra.max_tilt_deg = this->declare_parameter("resume_max_tilt_deg", ra.max_tilt_deg);
+  ra.target_radius = this->declare_parameter("resume_target_radius_m", ra.target_radius);
+  ra.target_z_band = this->declare_parameter("resume_target_z_band_m", ra.target_z_band);
+  ra.hint_radius = this->declare_parameter("resume_hint_radius_m", ra.hint_radius);
+  ra.hint_yaw_deg = this->declare_parameter("resume_hint_yaw_deg", ra.hint_yaw_deg);
+  ra.candidate_spacing =
+    this->declare_parameter("resume_candidate_spacing_m", ra.candidate_spacing);
+  ra.yaw_step_deg = this->declare_parameter("resume_yaw_step_deg", ra.yaw_step_deg);
+  ra.max_registrations = this->declare_parameter("resume_max_registrations", ra.max_registrations);
+  ra.ambiguity_ratio = this->declare_parameter("resume_ambiguity_ratio", ra.ambiguity_ratio);
+  ra.timeout_sec = this->declare_parameter("resume_search_timeout_sec", ra.timeout_sec);
+  RCLCPP_INFO(
+    this->get_logger(),
+    "[PGONode] resume_mapping: %d scans after skipping %d (wait <= %.0f s) | inlier ratio >= "
+    "%.2f, of the whole scan >= %.2f, tilt <= %.1f deg | target within %.1f m (z %.1f m) | hint "
+    "within %.1f m / %.0f deg | search: %.1f m x %.0f deg, %d registrations, ambiguous at %.2f, "
+    "<= %.0f s | first keyframe sigma %.3f m / %.2f deg / z %.3f m | loop z sigma %.3f m%s",
+    m_node_config.resume_align_scans, m_node_config.resume_align_skip_scans,
+    m_node_config.resume_align_timeout_sec, ra.gates.min_inlier_ratio, ra.min_source_inlier_ratio,
+    ra.max_tilt_deg, ra.target_radius, ra.target_z_band, ra.hint_radius, ra.hint_yaw_deg,
+    ra.candidate_spacing, ra.yaw_step_deg, ra.max_registrations, ra.ambiguity_ratio, ra.timeout_sec,
+    m_pgo_config.resume_anchor_xy_sigma_m, m_pgo_config.resume_anchor_yaw_sigma_deg,
+    m_pgo_config.resume_anchor_z_sigma_m, m_pgo_config.resume_loop_z_sigma_m,
+    m_pgo_config.resume_loop_z_sigma_m > 0.0 ? "" : " (<= 0: off)");
+
   // Post-save cleaning: passed on clean_map's command line and recorded in the sidecar. Ints:
   // nice, sparse_min_hits, dynamic_min_miss; bools: enabled, clip_below_floor, octomap; the rest
   // doubles.
@@ -468,11 +573,35 @@ void PGONode::syncCB(
   pair.pose.setTime(cloud_msg->header.stamp.sec, cloud_msg->header.stamp.nanosec);
   m_state.last_seen_time.store(pair.pose.second);
 
+  auto decode = [&pair, &cloud_msg, &odom_msg]() {
+    pair.pose.r = Eigen::Quaterniond(
+                    odom_msg->pose.pose.orientation.w, odom_msg->pose.pose.orientation.x,
+                    odom_msg->pose.pose.orientation.y, odom_msg->pose.pose.orientation.z)
+                    .toRotationMatrix();
+    pair.pose.t = V3D(
+      odom_msg->pose.pose.position.x, odom_msg->pose.pose.position.y,
+      odom_msg->pose.pose.position.z);
+    pair.cloud_msg = cloud_msg;
+  };
+
   // Gate first, so a dropped pair costs nothing. A pair outside MAPPING belongs to no run.
-  // IDLE keeps an identity TF alive for the console's live scan; RESETTING stays silent.
+  // IDLE keeps an identity TF alive for the console's live scan; RESETTING stays silent, and
+  // keeps a pair only for a resume_mapping that is collecting its alignment scans.
   const uint8_t phase = m_state.phase.load();
   if (phase != syncai_common::msg::MappingStatus::MAPPING) {
-    if (phase == syncai_common::msg::MappingStatus::IDLE) sendIdentityTF(cloud_msg->header.stamp);
+    if (phase == syncai_common::msg::MappingStatus::IDLE) {
+      sendIdentityTF(cloud_msg->header.stamp);
+    } else if (m_state.collecting.load() && pair.pose.second > m_state.collect_after_time.load()) {
+      decode();
+      std::lock_guard<std::mutex> lock(m_state.message_mutex);
+      // Re-read under the mutex: collectAlignmentPairs lowers the flag under it when it stops.
+      if (!m_state.collecting.load() || pair.pose.second <= m_state.collect_last_time) return;
+      m_state.collect_last_time = pair.pose.second;
+      if (m_state.collect_seen++ < m_state.collect_skip) return;
+      if (m_state.collected.size() >= m_state.collect_wanted) return;
+      m_state.collected.push_back(std::move(pair));
+      if (m_state.collected.size() == m_state.collect_wanted) m_state.collected_cv.notify_all();
+    }
     return;
   }
 
@@ -485,13 +614,7 @@ void PGONode::syncCB(
     return;
   }
 
-  pair.pose.r = Eigen::Quaterniond(
-                  odom_msg->pose.pose.orientation.w, odom_msg->pose.pose.orientation.x,
-                  odom_msg->pose.pose.orientation.y, odom_msg->pose.pose.orientation.z)
-                  .toRotationMatrix();
-  pair.pose.t = V3D(
-    odom_msg->pose.pose.position.x, odom_msg->pose.pose.position.y, odom_msg->pose.pose.position.z);
-  pair.cloud_msg = cloud_msg;
+  decode();
 
   std::lock_guard<std::mutex> lock(m_state.message_mutex);
   m_state.last_message_time = pair.pose.second;
@@ -516,8 +639,10 @@ void PGONode::sendBroadCastTF(builtin_interfaces::msg::Time & time)
   m_tf_broadcaster->sendTransform(transformStamped);
 }
 
-// Identity is a fresh optimizer's offset, so the first keyframe after a Start causes no jump. No
-// m_pgo access: this runs on the intake thread while a Start may be replacing m_pgo.
+// Identity is a fresh optimizer's offset, so the first keyframe after a Start causes no jump.
+// (After a resume it does jump, once, to where the alignment put the run in the saved map: that
+// is the resume.) No m_pgo access: this runs on the intake thread while a Start may be replacing
+// m_pgo.
 void PGONode::sendIdentityTF(const builtin_interfaces::msg::Time & time)
 {
   geometry_msgs::msg::TransformStamped transformStamped;
@@ -675,13 +800,19 @@ void PGONode::timerCB()
     const double rot_deg = Eigen::AngleAxisd(lp.gicp_r).angle() * 180.0 / M_PI;
     // The source keyframe's displacement, not the raw t: the rotation is about the world origin.
     const V3D moved = lp.gicp_r * src.t_global + lp.gicp_t - src.t_global;
+    // Against a keyframe of the resumed map, the registered dz is the height error between the
+    // two runs: what resume_loop_z_sigma_m would act on, logged to decide whether it should.
+    char saved[64] = "";
+    if (m_pgo->isPrior(lp.target_id))
+      std::snprintf(
+        saved, sizeof(saved), " | saved-map target, registered dz %+.3f m", lp.registered_dz);
     RCLCPP_INFO(
       this->get_logger(),
       "[PGONode][loop] target %zu -> source %zu | fitness %.4f | GICP moves source by "
       "(%.3f, %.3f, %.3f) m, rot %.2f deg | z before: target %.3f source %.3f (source-target "
-      "%+.3f)",
+      "%+.3f)%s",
       lp.target_id, lp.source_id, lp.score, moved.x(), moved.y(), moved.z(), rot_deg,
-      tgt.t_global.z(), src.t_global.z(), src.t_global.z() - tgt.t_global.z());
+      tgt.t_global.z(), src.t_global.z(), src.t_global.z() - tgt.t_global.z(), saved);
   }
   // The ids survive the update (they index m_key_poses); the pairs do not.
   std::vector<std::pair<size_t, size_t>> loop_ids;
@@ -734,15 +865,23 @@ void PGONode::publishMapCloud(builtin_interfaces::msg::Time & time)
   // Snapshot by value under m_pgo_mutex. Cloud Ptrs are shared safely: a keyframe's cloud is
   // never written after insertion. (Not getSubMap(), which reads keyPoses live.)
   std::vector<KeyPoseWithCloud> snapshot = m_pgo->keyPoses();
+  const size_t prior_count = m_pgo->priorCount();
   const uint64_t seq = ++m_map_cloud_seq;
-  m_map_cloud_thread =
-    std::thread(&PGONode::mergeAndPublishMapCloud, this, std::move(snapshot), time, seq);
+  m_map_cloud_thread = std::thread(
+    &PGONode::mergeAndPublishMapCloud, this, std::move(snapshot), prior_count, time, seq);
 }
 
 // Runs on m_map_cloud_thread: late in a run this takes hundreds of ms, and the timer's TF
 // broadcast must not gap for that long.
+//
+// A resumed run is handed off in two halves: the saved map (the first prior_count keyframes) and
+// what this run added. The console draws them apart, so an operator can see what the run has
+// covered and catch a resume that landed off the saved map, as a wall drawn twice. The saved
+// half is merged and written once per run: its keyframes are frozen, so it cannot change, and a
+// large saved map is then not re-sent with every keyframe. rviz's PointCloud2 stays whole.
 void PGONode::mergeAndPublishMapCloud(
-  std::vector<KeyPoseWithCloud> snapshot, builtin_interfaces::msg::Time time, uint64_t seq)
+  std::vector<KeyPoseWithCloud> snapshot, size_t prior_count, builtin_interfaces::msg::Time time,
+  uint64_t seq)
 {
   // Stacked from the per-keyframe previews, already at map_cloud_resolution, and re-voxelised
   // whenever the stack passes kMergeVoxelEvery points: the merge stays the size of the place, not
@@ -760,31 +899,56 @@ void PGONode::mergeAndPublishMapCloud(
     cloud = out;
   };
 
-  CloudType::Ptr merged(new CloudType);
-  CloudType world_cloud;
-  size_t since_voxel = 0;
-  for (const auto & kp : snapshot) {
-    const CloudType::Ptr & src = kp.preview_cloud ? kp.preview_cloud : kp.body_cloud;
-    pcl::transformPointCloud(*src, world_cloud, kp.t_global, Eigen::Quaterniond(kp.r_global));
-    *merged += world_cloud;
-    since_voxel += world_cloud.size();
-    if (res > 0 && since_voxel >= kMergeVoxelEvery) {
-      voxelize(merged);
-      since_voxel = 0;
+  auto mergeKeyframes = [&](size_t begin, size_t end) {
+    CloudType::Ptr merged(new CloudType);
+    CloudType world_cloud;
+    size_t since_voxel = 0;
+    for (size_t i = begin; i < end; i++) {
+      const KeyPoseWithCloud & kp = snapshot[i];
+      const CloudType::Ptr & src = kp.preview_cloud ? kp.preview_cloud : kp.body_cloud;
+      pcl::transformPointCloud(*src, world_cloud, kp.t_global, Eigen::Quaterniond(kp.r_global));
+      *merged += world_cloud;
+      since_voxel += world_cloud.size();
+      if (res > 0 && since_voxel >= kMergeVoxelEvery) {
+        voxelize(merged);
+        since_voxel = 0;
+      }
     }
-  }
-  if (res > 0 && since_voxel > 0) voxelize(merged);
+    if (res > 0 && since_voxel > 0) voxelize(merged);
+    return merged;
+  };
+
+  const size_t prior = std::min(prior_count, snapshot.size());
+  if (prior > 0 && !m_prior_merged) m_prior_merged = mergeKeyframes(0, prior);
+  CloudType::Ptr merged = mergeKeyframes(prior, snapshot.size());
 
   // Already in the map frame. Subscriber counts re-read so a reader that left mid-merge costs
   // nothing.
   if (m_map_cloud_pub->get_subscription_count() > 0) {
     sensor_msgs::msg::PointCloud2 msg;
-    pcl::toROSMsg(*merged, msg);
+    if (m_prior_merged) {
+      CloudType whole = *m_prior_merged;
+      whole += *merged;
+      pcl::toROSMsg(whole, msg);
+    } else {
+      pcl::toROSMsg(*merged, msg);
+    }
     msg.header.frame_id = m_node_config.map_frame;
     msg.header.stamp = time;
     m_map_cloud_pub->publish(msg);
   }
   if (m_map_cloud_dir_ok && m_map_cloud_file_pub->get_subscription_count() > 0) {
+    // Named by the seq of the merge that wrote it, so a second resume in this process is a new
+    // path and a reader that skips a path it has read never keeps the first one's map. A failed
+    // write is tried again by the next merge.
+    if (m_prior_merged && !m_prior_merged->empty() && m_prior_cloud_path.empty()) {
+      const std::filesystem::path prior_path = std::filesystem::path(m_map_cloud_dir) /
+                                               ("map_cloud_prior_" + std::to_string(seq) + ".pcd");
+      if (writeMapCloudFile(*m_prior_merged, prior_path)) {
+        m_prior_cloud_path = prior_path.string();
+        m_prior_cloud_points = m_prior_merged->size();
+      }
+    }
     writeAndAnnounceMapCloud(*merged, seq, time);
   }
 
@@ -806,7 +970,7 @@ void PGONode::publishEmptyMapCloud(const builtin_interfaces::msg::Time & time)
   msg.header.stamp = time;
   m_map_cloud_pub->publish(msg);
 
-  publishMapCloudNotice(++m_map_cloud_seq, "", 0, time);
+  publishMapCloudNotice(++m_map_cloud_seq, "", 0, "", 0, time);
   clearMapCloudDir();
 }
 
@@ -826,10 +990,16 @@ void PGONode::stopRunLocked(const builtin_interfaces::msg::Time & now)
   if (m_map_cloud_thread.joinable()) m_map_cloud_thread.join();
   m_map_cloud_busy.store(false);
   m_last_map_cloud_time = 0.0;
+  // The worker is joined, so these are ours; the file itself goes with the empty notice below.
+  m_prior_merged.reset();
+  m_prior_cloud_path.clear();
+  m_prior_cloud_points = 0;
 
   // The constructor IS the reset (gtsam::ISAM2 has no clear, so a reset() method would be a second
-  // definition of "empty"). After a save this also frees the keyframe clouds.
+  // definition of "empty"). After a save this also frees the keyframe clouds, a resumed map's
+  // among them (resumeMappingCB sets both again after this).
   m_pgo = std::make_shared<PoseGraphOptimizer>(m_pgo_config);
+  m_prior_dir.clear();
 
   {
     std::lock_guard<std::mutex> lock(m_state.message_mutex);
@@ -844,11 +1014,38 @@ void PGONode::stopRunLocked(const builtin_interfaces::msg::Time & now)
   publishLoopMarkerDeleteAll();
 }
 
+bool PGONode::resetLio(
+  const char * tag, const char * kept, std::string & message, double & last_odom_time)
+{
+  if (!m_lio_reset_cli->wait_for_service(std::chrono::seconds(2))) {
+    message = "LIO reset service " + m_node_config.lio_reset_service + " is not available; " + kept;
+    RCLCPP_ERROR(this->get_logger(), "[PGONode][%s] %s", tag, message.c_str());
+    return false;
+  }
+
+  auto future =
+    m_lio_reset_cli->async_send_request(std::make_shared<syncai_common::srv::ResetLIO::Request>());
+  if (future.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+    message = std::string("Timed out waiting for the LIO reset; ") + kept;
+    RCLCPP_ERROR(this->get_logger(), "[PGONode][%s] %s", tag, message.c_str());
+    return false;
+  }
+
+  auto lio_response = future.get();
+  if (!lio_response->success) {
+    message = "LIO refused the reset (" + lio_response->message + "); " + kept;
+    RCLCPP_ERROR(this->get_logger(), "[PGONode][%s] %s", tag, message.c_str());
+    return false;
+  }
+  last_odom_time = lio_response->last_odom_time;
+  return true;
+}
+
 // Ordered so the only fallible step runs before anything is destroyed; every failure exits
 // through the guard that restores the previous phase, so there is no half-reset.
 bool PGONode::beginRun(
   bool reset_lio, uint8_t required_phase, std::string & message, double & last_odom_time,
-  uint32_t & dropped)
+  uint32_t & dropped, uint32_t & unloaded)
 {
   using syncai_common::msg::MappingStatus;
   const bool is_start = required_phase == MappingStatus::IDLE;
@@ -856,12 +1053,13 @@ bool PGONode::beginRun(
   const char * kept = is_start ? "nothing started" : "map kept";
   last_odom_time = 0.0;
   dropped = 0;
+  unloaded = 0;
 
   // ---- Phase 1: pause. ----
   //
   // RESETTING keeps the odometry discontinuity out of the graph: no sleep or slack window needed.
   if (m_transitioning.exchange(true)) {
-    message = "A start or reset is already running";
+    message = "A start, resume or reset is already running";
     return false;
   }
   // Every early return (or exception) restores the phase and clears the flag. `armed`: paused, as
@@ -901,36 +1099,15 @@ bool PGONode::beginRun(
   // ---- Phase 2: reset the front end. The only fallible step. ----
   //
   // Outside m_pgo_mutex: it blocks for seconds, which would stall the timer's TF broadcast.
-  if (reset_lio) {
-    if (!m_lio_reset_cli->wait_for_service(std::chrono::seconds(2))) {
-      message =
-        "LIO reset service " + m_node_config.lio_reset_service + " is not available; " + kept;
-      RCLCPP_ERROR(this->get_logger(), "[PGONode][%s] %s", tag, message.c_str());
-      return false;
-    }
-
-    auto future = m_lio_reset_cli->async_send_request(
-      std::make_shared<syncai_common::srv::ResetLIO::Request>());
-    if (future.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
-      message = std::string("Timed out waiting for the LIO reset; ") + kept;
-      RCLCPP_ERROR(this->get_logger(), "[PGONode][%s] %s", tag, message.c_str());
-      return false;
-    }
-
-    auto lio_response = future.get();
-    if (!lio_response->success) {
-      message = "LIO refused the reset (" + lio_response->message + "); " + kept;
-      RCLCPP_ERROR(this->get_logger(), "[PGONode][%s] %s", tag, message.c_str());
-      return false;
-    }
-    last_odom_time = lio_response->last_odom_time;
-  }
+  if (reset_lio && !resetLio(tag, kept, message, last_odom_time)) return false;
 
   // ---- Phase 3: rebuild the graph. Nothing below can fail. ----
   builtin_interfaces::msg::Time now = this->get_clock()->now();
   {
     std::lock_guard<std::mutex> pgo_lock(m_pgo_mutex);
-    dropped = static_cast<uint32_t>(m_pgo->keyPoses().size());
+    // A resumed run's saved keyframes are not lost with it: they are the map on disk.
+    unloaded = static_cast<uint32_t>(m_pgo->priorCount());
+    dropped = static_cast<uint32_t>(m_pgo->keyPoses().size()) - unloaded;
     stopRunLocked(now);
     // The new run's boundary: pointlio's reported stamp with a LIO reset; otherwise the last
     // pair seen for a start, and 0.0 for a reset (held pairs pass, as replays expect).
@@ -953,8 +1130,10 @@ void PGONode::startMappingCB(
   std::string message;
   double last_odom_time = 0.0;
   uint32_t dropped = 0;
+  uint32_t unloaded = 0;
   const bool ok = beginRun(
-    request->reset_lio, syncai_common::msg::MappingStatus::IDLE, message, last_odom_time, dropped);
+    request->reset_lio, syncai_common::msg::MappingStatus::IDLE, message, last_odom_time, dropped,
+    unloaded);
   response->success = ok;
   response->lio_last_odom_time = last_odom_time;
   if (!ok) {
@@ -980,9 +1159,10 @@ void PGONode::resetMappingCB(
   std::string message;
   double last_odom_time = 0.0;
   uint32_t dropped = 0;
+  uint32_t unloaded = 0;
   const bool ok = beginRun(
     request->reset_lio, syncai_common::msg::MappingStatus::MAPPING, message, last_odom_time,
-    dropped);
+    dropped, unloaded);
   response->success = ok;
   response->lio_last_odom_time = last_odom_time;
   response->dropped_key_poses = dropped;
@@ -995,9 +1175,314 @@ void PGONode::resetMappingCB(
                         ? "Map discarded. The new one starts building once the "
                           "lidar has re-levelled — keep the robot still until then."
                         : "Pose graph reset. The LIO front end was left running.";
+  // A reset is always a new, empty map: it does not go back to the start of a resume. Said,
+  // because the operator's map view has just lost the saved map as well.
+  if (unloaded > 0)
+    response->message +=
+      " The saved map this run had resumed is no longer loaded (it is unchanged on disk): this "
+      "is a new, empty map.";
   RCLCPP_WARN(
-    this->get_logger(), "[PGONode][resetMappingCB] %s (dropped %u key poses)",
-    response->message.c_str(), dropped);
+    this->get_logger(),
+    "[PGONode][resetMappingCB] %s (dropped %u key poses, unloaded %u of a resumed map)",
+    response->message.c_str(), dropped, unloaded);
+}
+
+bool PGONode::collectAlignmentPairs(double boundary, std::vector<PendingPair> & pairs)
+{
+  const size_t wanted = static_cast<size_t>(std::max(1, m_node_config.resume_align_scans));
+  {
+    std::lock_guard<std::mutex> lock(m_state.message_mutex);
+    m_state.collected.clear();
+    m_state.collect_seen = 0;
+    m_state.collect_last_time = -1.0;
+    m_state.collect_skip = static_cast<size_t>(std::max(0, m_node_config.resume_align_skip_scans));
+    m_state.collect_wanted = wanted;
+  }
+  // The boundary before the flag: a pair must never be judged against the previous one.
+  m_state.collect_after_time.store(boundary);
+  m_state.collecting.store(true);
+
+  std::unique_lock<std::mutex> lock(m_state.message_mutex);
+  m_state.collected_cv.wait_for(
+    lock, std::chrono::duration<double>(m_node_config.resume_align_timeout_sec),
+    [this, wanted] { return m_state.collected.size() >= wanted; });
+  // Lowered under the mutex, so syncCB appends nothing once the pairs are taken.
+  m_state.collecting.store(false);
+  pairs = std::move(m_state.collected);
+  m_state.collected.clear();
+  return pairs.size() >= wanted;
+}
+
+// IDLE -> MAPPING with a saved map loaded. The order is beginRun's idea taken further: whatever
+// can fail without having touched anything runs first (the load, while still IDLE), and nothing
+// is built until the alignment has an answer.
+void PGONode::resumeMappingCB(
+  const std::shared_ptr<syncai_common::srv::ResumeMapping::Request> request,
+  std::shared_ptr<syncai_common::srv::ResumeMapping::Response> response)
+{
+  using syncai_common::msg::MappingStatus;
+  using syncai_common::srv::ResumeMapping;
+  const char * tag = "resumeMappingCB";
+  response->success = false;
+  response->method = ResumeMapping::Response::METHOD_NONE;
+  auto fail = [&](const std::string & message) {
+    response->message = message;
+    RCLCPP_ERROR(this->get_logger(), "[PGONode][%s] %s", tag, message.c_str());
+  };
+
+  if (m_transitioning.exchange(true)) {
+    response->message = "A start, resume or reset is already running";
+    return;
+  }
+  // Every early return (or exception) puts the phase back to IDLE once it was paused, stops a
+  // collection in flight and clears the flag.
+  struct ResumeGuard
+  {
+    PGONode * self;
+    bool armed = false;
+    bool committed = false;
+    ~ResumeGuard()
+    {
+      self->m_state.collecting.store(false);
+      if (armed && !committed) {
+        self->m_state.phase.store(MappingStatus::IDLE);
+        self->publishStatus();
+      }
+      self->m_transitioning.store(false);
+    }
+  } resume_guard{this};
+
+  // Cheap refusal before the load. Not yet the authoritative check (that one is under the mutex,
+  // below), but nothing can leave IDLE meanwhile: start and reset are held off by
+  // m_transitioning, and a save is refused in IDLE.
+  if (m_state.phase.load() != MappingStatus::IDLE) {
+    response->message =
+      "Already mapping: save_maps to finish this run first. A saved map is resumed from idle.";
+    return;
+  }
+
+  // ---- Phase 1: read the saved map. Still IDLE, the identity TF still up. ----
+  SavedMap saved;
+  std::filesystem::path prior_dir;
+  try {
+    saved = readSavedMap(request->map_path);
+    prior_dir = std::filesystem::canonical(request->map_path);
+  } catch (const std::exception & e) {
+    fail(std::string(e.what()) + " Nothing started.");
+    return;
+  }
+  response->prior_key_poses = static_cast<uint32_t>(saved.key_poses.size());
+  if (!saved.warning.empty())
+    RCLCPP_WARN(this->get_logger(), "[PGONode][%s] %s", tag, saved.warning.c_str());
+  // The live merge's input, as timerCB makes it for a new keyframe: without it every merge would
+  // stack the saved map's dense clouds.
+  if (m_node_config.map_cloud_resolution > 0) {
+    const double res = m_node_config.map_cloud_resolution;
+    pcl::VoxelGrid<PointType> voxel_filter;
+    voxel_filter.setLeafSize(res, res, res);
+    for (KeyPoseWithCloud & kp : saved.key_poses) {
+      kp.preview_cloud.reset(new CloudType);
+      voxel_filter.setInputCloud(kp.body_cloud);
+      voxel_filter.filter(*kp.preview_cloud);
+    }
+  }
+  RCLCPP_INFO(
+    this->get_logger(), "[PGONode][%s] read %zu keyframes of %zu run(s) from %s", tag,
+    saved.key_poses.size(), saved.session_starts.size(), prior_dir.c_str());
+
+  // ---- Phase 2: pause. ----
+  {
+    std::lock_guard<std::mutex> pgo_lock(m_pgo_mutex);
+    if (m_state.phase.load() != MappingStatus::IDLE) {
+      response->message = "Already mapping: save_maps to finish this run first.";
+      return;
+    }
+    m_state.phase.store(MappingStatus::RESETTING);
+    resume_guard.armed = true;
+  }
+  publishStatus();
+
+  // ---- Phase 3: reset the front end. From here a failure leaves the odometry reset, which in
+  // IDLE is nothing: no run was using it. ----
+  double last_odom_time = 0.0;
+  std::string message;
+  if (request->reset_lio && !resetLio(tag, "nothing started", message, last_odom_time)) {
+    response->message = message;
+    return;
+  }
+  response->lio_last_odom_time = last_odom_time;
+
+  // ---- Phase 4: the scans. Without a LIO reset the stream has no break to wait behind: the
+  // boundary is the last pair seen. ----
+  std::vector<PendingPair> pairs;
+  if (!collectAlignmentPairs(
+        request->reset_lio ? last_odom_time : m_state.last_seen_time.load(), pairs)) {
+    // After a reset pointlio publishes nothing until it has levelled itself, which it only does
+    // standing still: the usual reason for silence here.
+    char buf[240];
+    std::snprintf(
+      buf, sizeof(buf),
+      "The lidar odometry sent %zu of the %d scans needed within %.0f s%s Nothing started.",
+      pairs.size(), m_node_config.resume_align_scans, m_node_config.resume_align_timeout_sec,
+      request->reset_lio ? " of its reset. Keep the robot still and try again." : ".");
+    fail(buf);
+    return;
+  }
+
+  // ---- Phase 5: where the robot stands in the saved map. ----
+  SessionAlignRequest align;
+  align.cloud_odom.reset(new CloudType);
+  {
+    CloudType body, odom;
+    for (const PendingPair & pair : pairs) {
+      pcl::fromROSMsg(*pair.cloud_msg, body);
+      pcl::transformPointCloud(body, odom, pair.pose.t, Eigen::Quaterniond(pair.pose.r));
+      *align.cloud_odom += odom;
+    }
+  }
+  align.r_body = pairs.back().pose.r;
+  align.t_body = pairs.back().pose.t;
+  align.use_hint = request->use_hint;
+  align.hint_position = V3D(request->x, request->y, request->z);
+  align.hint_yaw = request->yaw;
+  // No hint from the caller: where the nav session's localizer last had the robot, if that was
+  // on this map. The file names a map by its directory's name, as [map] name does.
+  bool from_last_pose = false;
+  if (
+    !request->use_hint && m_node_config.resume_use_last_pose &&
+    !m_node_config.resume_last_pose_file.empty()) {
+    std::string why;
+    const std::string map_name = prior_dir.filename().string();
+    const auto last = readLastPoseFile(m_node_config.resume_last_pose_file, why);
+    if (!last) {
+      RCLCPP_INFO(
+        this->get_logger(), "[PGONode][%s] no last pose to start from (%s: %s)", tag,
+        m_node_config.resume_last_pose_file.c_str(), why.c_str());
+    } else if (last->map != map_name) {
+      RCLCPP_INFO(
+        this->get_logger(),
+        "[PGONode][%s] the localizer's last pose is on map '%s', not '%s': not used", tag,
+        last->map.c_str(), map_name.c_str());
+    } else {
+      from_last_pose = true;
+      align.use_hint = true;
+      // The body above the ground the file gives; z only picks the storey.
+      align.hint_position =
+        V3D(last->x, last->y, last->ground_z + m_node_config.map_clean.lidar_height);
+      align.hint_yaw = last->yaw;
+      align.hint_radius = m_node_config.resume_last_pose_radius_m;
+      align.hint_yaw_deg = m_node_config.resume_last_pose_yaw_deg;
+      RCLCPP_INFO(
+        this->get_logger(),
+        "[PGONode][%s] trying the localizer's last pose first: (%.2f, %.2f) yaw %.1f deg, saved "
+        "%s",
+        tag, last->x, last->y, last->yaw * 180.0 / M_PI,
+        last->saved_at.empty() ? "at an unknown time" : last->saved_at.c_str());
+    }
+  }
+  // Not a refusal: the accumulation goes through the odometry, so a robot that moved is still
+  // aligned correctly. But it was told to stand, and the IMU initialisation before these scans
+  // could not see it move either.
+  const double moved = (pairs.back().pose.t - pairs.front().pose.t).norm();
+  if (moved > 0.1)
+    RCLCPP_WARN(
+      this->get_logger(),
+      "[PGONode][%s] the robot moved %.2f m while the alignment scans were taken", tag, moved);
+
+  const double last_pair_time = pairs.back().pose.second;
+  pairs.clear();
+  SessionAligner aligner(m_node_config.resume_aligner);
+  // Every registered candidate: what the alignment's gates are calibrated from.
+  auto logAttempts = [&](const SessionAlignResult & result) {
+    for (const SessionAlignAttempt & a : result.attempts) {
+      RCLCPP_INFO(
+        this->get_logger(),
+        "[PGONode][%s] candidate at (%.2f, %.2f, %.2f) yaw %.1f deg | coarse %.2f | overlap %.2f "
+        "inlier %.2f of scan %.2f fitness %.4f xy info %.3f tilt %.2f deg | %s%s",
+        tag, a.position.x(), a.position.y(), a.position.z(), a.yaw * 180.0 / M_PI, a.coarse_score,
+        a.registration.overlap_ratio, a.registration.inlier_ratio,
+        a.registration.source_inlier_ratio, a.registration.fitness, a.registration.xy_info_ratio,
+        a.tilt_residual_deg, a.passed ? "passed" : "rejected: ", a.reject_reason);
+    }
+  };
+  SessionAlignResult aligned = aligner.align(saved.key_poses, align);
+  logAttempts(aligned);
+  if (from_last_pose && !aligned.success) {
+    // Not a failure, unlike a caller's hint that does not register: nobody said the robot is
+    // there. It was driven in this session, or carried, after the file was written.
+    RCLCPP_WARN(
+      this->get_logger(),
+      "[PGONode][%s] the robot is not where the localizer last saved it (%s) Searching the "
+      "whole saved map.",
+      tag, aligned.message.c_str());
+    from_last_pose = false;
+    align.use_hint = false;
+    align.hint_radius = 0.0;
+    align.hint_yaw_deg = 0.0;
+    aligned = aligner.align(saved.key_poses, align);
+    logAttempts(aligned);
+  }
+  if (!aligned.success) {
+    fail(aligned.message + " Nothing started.");
+    return;
+  }
+
+  // ---- Phase 6: the run. Nothing below can fail. ----
+  //
+  // Built outside the mutex (loading descriptors for a large map takes a moment), swapped in
+  // under it. stopRunLocked first, although there is no run to stop: it is what sends the empty
+  // notice and resets the intake, so the saved map arrives as a new map and never as an update
+  // of whatever a late subscriber still shows.
+  const size_t prior_count = saved.key_poses.size();
+  auto pgo = std::make_shared<PoseGraphOptimizer>(m_pgo_config);
+  pgo->loadPrior(
+    std::move(saved.key_poses), saved.session_starts, aligned.r_offset, aligned.t_offset);
+  {
+    std::lock_guard<std::mutex> pgo_lock(m_pgo_mutex);
+    stopRunLocked(this->get_clock()->now());
+    m_pgo = pgo;
+    m_prior_dir = prior_dir;
+    m_key_pose_count.store(static_cast<uint32_t>(prior_count));
+    // The alignment's scans are spent; the run begins with the pair after them. That pair is a
+    // keyframe (the run's first always is), so the saved map is merged and published with it,
+    // a scan after this returns.
+    m_state.accept_after_time.store(last_pair_time);
+    m_state.phase.store(MappingStatus::MAPPING);
+    resume_guard.committed = true;
+  }
+  publishStatus();
+
+  response->success = true;
+  response->method = from_last_pose      ? ResumeMapping::Response::METHOD_LAST_POSE
+                     : aligned.used_hint ? ResumeMapping::Response::METHOD_HINT
+                                         : ResumeMapping::Response::METHOD_GLOBAL;
+  response->aligned_x = aligned.position.x();
+  response->aligned_y = aligned.position.y();
+  response->aligned_z = aligned.position.z();
+  response->aligned_yaw = aligned.yaw;
+  response->fitness = aligned.registration.fitness;
+  response->overlap_ratio = aligned.registration.overlap_ratio;
+  response->inlier_ratio = aligned.registration.inlier_ratio;
+  response->xy_info_ratio = aligned.registration.xy_info_ratio;
+  response->tilt_residual_deg = aligned.tilt_residual_deg;
+  // UI copy, as in startMappingCB. No stillness warning: the levelling it protects is over.
+  char buf[320];
+  std::snprintf(
+    buf, sizeof(buf),
+    "Resumed the saved map (%zu keyframes): the robot is at (%.1f, %.1f), heading %.0f°. New "
+    "keyframes are added to it — save under a new map name when done.",
+    prior_count, aligned.position.x(), aligned.position.y(), aligned.yaw * 180.0 / M_PI);
+  response->message = buf;
+  RCLCPP_WARN(
+    this->get_logger(),
+    "[PGONode][%s] %s (%s, %zu candidates, overlap %.2f inlier %.2f fitness %.4f, the run's up "
+    "turned %.2f deg onto the saved map's)",
+    tag, response->message.c_str(),
+    from_last_pose      ? "the localizer's last pose"
+    : aligned.used_hint ? "hint"
+                        : "global search",
+    aligned.candidates, aligned.registration.overlap_ratio, aligned.registration.inlier_ratio,
+    aligned.registration.fitness, aligned.tilt_residual_deg);
 }
 
 // Serialise the run to disk and END it: MAPPING -> IDLE (keyframes freed, empty map published,
@@ -1018,7 +1503,7 @@ void PGONode::saveMapsCB(
     response->message =
       phase == MappingStatus::IDLE
         ? "Not mapping (idle): nothing to save. Call start_mapping to begin a run."
-        : "A start or reset is in progress; try again in a moment.";
+        : "A start, resume or reset is in progress; try again in a moment.";
     return;
   }
 
@@ -1042,6 +1527,21 @@ void PGONode::saveMapsCB(
     response->success = false;
     response->message = "NO POSES!";
     return;
+  }
+
+  // A resumed run is saved as another map. Into the directory it was read from, the save below
+  // would empty patches/ first, the only copy of the saved map, and a write that then failed
+  // (a full disk is the likely one, with every keyframe written twice over) would leave neither
+  // map. Without patches it would leave the old poses.txt beside a map.pcd of more keyframes.
+  if (!m_prior_dir.empty()) {
+    std::error_code ec;
+    if (std::filesystem::equivalent(request->file_path, m_prior_dir, ec) && !ec) {
+      response->success = false;
+      response->message =
+        "This run was resumed from that map: save it under a new map name. Nothing was saved, "
+        "the run is kept.";
+      return;
+    }
   }
 
   // A live merge still running holds its own copy of the run's clouds; let it finish before the
@@ -1073,19 +1573,8 @@ void PGONode::saveMapsCB(
     }
     RCLCPP_INFO(this->get_logger(), "SAVE MAP TO %s", map_path.string().c_str());
 
-    if (request->save_patches) {
-      // Opening it truncates an existing poses.txt.
-      std::ofstream txt_file(poses_txt_path);
-      for (size_t i = 0; i < m_pgo->keyPoses().size(); i++) {
-        std::string patch_name = std::to_string(i) + ".pcd";
-        std::filesystem::path patch_path = patches_dir / patch_name;
-        pcl::io::savePCDFileBinary(patch_path.string(), *m_pgo->keyPoses()[i].body_cloud);
-        Eigen::Quaterniond q(m_pgo->keyPoses()[i].r_global);
-        V3D t = m_pgo->keyPoses()[i].t_global;
-        txt_file << patch_name << " " << t.x() << " " << t.y() << " " << t.z() << " " << q.w()
-                 << " " << q.x() << " " << q.y() << " " << q.z() << std::endl;
-      }
-    }
+    // patches/, poses.txt and, for a resumed run, sessions.json (map_writer.h).
+    if (request->save_patches) writeKeyframes(p_dir, m_pgo->keyPoses(), m_pgo->sessionStarts());
 
     // Streamed, never merged in memory: see map_writer.h. Atomic, so a failed save leaves the
     // previous map.pcd whole rather than truncated.
@@ -1099,6 +1588,7 @@ void PGONode::saveMapsCB(
 
   // ---- The run is on disk: end it. ----
   const size_t saved = m_pgo->keyPoses().size();
+  const size_t resumed = m_pgo->priorCount();
   stopRunLocked(this->get_clock()->now());
   m_state.phase.store(MappingStatus::IDLE);
   publishStatus();
@@ -1111,8 +1601,10 @@ void PGONode::saveMapsCB(
                          ? m_node_config.map_clean.octomap
                          : request->octomap == SaveMaps::Request::OCTOMAP_ON;
   const std::string clean_note = startMapClean(p_dir, request->save_patches, octomap);
-  response->message = "Map saved (" + std::to_string(saved) +
-                      " keyframes). Mapping stopped — start it again for another map." + clean_note;
+  response->message =
+    "Map saved (" + std::to_string(saved) + " keyframes" +
+    (resumed > 0 ? ", " + std::to_string(saved - resumed) + " of them new" : std::string()) +
+    "). Mapping stopped — start it again for another map." + clean_note;
   RCLCPP_WARN(
     this->get_logger(), "[PGONode][saveMapsCB] %s (%s)", response->message.c_str(),
     map_path.string().c_str());

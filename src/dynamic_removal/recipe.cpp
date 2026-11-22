@@ -126,7 +126,10 @@ std::string ok(
   mj["skipped_patches"] = m.skipped_patches;
   mj["points"] = m.points;
   mj["clipped_rays"] = m.clipped_rays;
+  mj["sessions"] = m.sessions;
+  if (!m.sessions_warning.empty()) mj["sessions_warning"] = m.sessions_warning;
   mj["dynamic_voxels"] = m.dynamic_voxels;
+  mj["session_kept_voxels"] = m.session_kept_voxels;
   mj["sparse_voxels"] = m.sparse_voxels;
   mj["map_points_removed"] = m.map_points_removed;
   mj["map_points_kept"] = m.map_points_kept;

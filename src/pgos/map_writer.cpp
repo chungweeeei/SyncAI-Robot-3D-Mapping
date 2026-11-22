@@ -65,3 +65,31 @@ void writeMergedMapPcd(
   std::filesystem::rename(tmp, path, ec);
   if (ec) fail("cannot rename " + tmp.string() + ": " + ec.message());
 }
+
+void writeKeyframes(
+  const std::filesystem::path & dir, const std::vector<KeyPoseWithCloud> & key_poses,
+  const std::vector<size_t> & session_starts)
+{
+  const std::filesystem::path patches_dir = dir / "patches";
+  std::filesystem::create_directories(patches_dir);
+
+  {
+    // Opening it truncates an existing poses.txt.
+    std::ofstream txt_file(dir / "poses.txt");
+    for (size_t i = 0; i < key_poses.size(); i++) {
+      std::string patch_name = std::to_string(i) + ".pcd";
+      std::filesystem::path patch_path = patches_dir / patch_name;
+      pcl::io::savePCDFileBinary(patch_path.string(), *key_poses[i].body_cloud);
+      Eigen::Quaterniond q(key_poses[i].r_global);
+      V3D t = key_poses[i].t_global;
+      txt_file << patch_name << " " << t.x() << " " << t.y() << " " << t.z() << " " << q.w() << " "
+               << q.x() << " " << q.y() << " " << q.z() << std::endl;
+    }
+    txt_file.close();
+    // The patches throw by themselves (pcl); a full disk under poses.txt would otherwise leave a
+    // short list beside a complete patches/, which a resume reads as a smaller map.
+    if (!txt_file) throw std::runtime_error("write failed: " + (dir / "poses.txt").string());
+  }
+
+  writeSessions(dir, key_poses.size(), session_starts);
+}

@@ -7,7 +7,8 @@
 # local frame (<robot_id>/pointlio_odom) from it, so they are not parameters.
 #
 # Parameters come from params/mapping_params.yaml; this launch layers only
-# map_cloud_dir (robot_id-dependent) and start_on_launch on top.
+# map_cloud_dir and resume_last_pose_file (both robot_id-dependent) and
+# start_on_launch on top.
 
 import configparser
 import os
@@ -51,6 +52,16 @@ def read_robot_id(config_path: str) -> str:
     return robot_id
 
 
+# <workspace>/config/state/<robot_id>/last_pose.json: the file syncai_localizer
+# saves its last trusted pose to, which a resume_mapping without a hint starts
+# from. The same derivation as localizer.launch.py's last_pose_path (the
+# workspace root is two directories above the INI), on purpose: the two must
+# name one file, so change them together.
+def last_pose_path(config_path: str, robot_id: str) -> str:
+    workspace_root = os.path.dirname(os.path.dirname(os.path.abspath(config_path)))
+    return os.path.join(workspace_root, "config", "state", robot_id, "last_pose.json")
+
+
 def launch_setup(context, *args, **kwargs):
     config_path = LaunchConfiguration("system_config").perform(context)
     robot_id = read_robot_id(config_path)
@@ -69,6 +80,9 @@ def launch_setup(context, *args, **kwargs):
         "map_cloud_dir": f"{map_cloud_base}/{robot_id}",
         # Lets a bag replay skip pgo/start_mapping from the command line.
         "start_on_launch": start_on_launch,
+        # Read-only here; a missing file is "search the whole map".
+        "resume_last_pose_file": LaunchConfiguration("last_pose_file").perform(context)
+        or last_pose_path(config_path, robot_id),
     }
 
     # `name=` is safe: this process hosts a single node (unlike the planner /
@@ -104,6 +118,12 @@ def generate_launch_description():
                 default_value="false",
                 description="true: map from the first pair instead of waiting for "
                 "pgo/start_mapping (bag replays)",
+            ),
+            DeclareLaunchArgument(
+                "last_pose_file",
+                default_value="",
+                description="The localizer's last pose file a resume_mapping without a "
+                "hint starts from; empty: <workspace>/config/state/<robot_id>/last_pose.json",
             ),
             OpaqueFunction(function=launch_setup),
         ]
