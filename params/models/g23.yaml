@@ -1,0 +1,18 @@
+# The G23's body, over params/mapping_params.yaml: loaded after it by
+# mapping.launch.py when the system INI's [system] robot_model is g23 (or names
+# none). These two keys lived in the shared file until 2026-11-24, values
+# unchanged; every model's file sets both.
+
+/**/pgo_node:
+  ros__parameters:
+    # The robot's own body round the lidar, m: points nearer are not judged by
+    # clean_map and stay in map.pcd.
+    map_clean_min_range: 0.5
+    # Keyframe z minus this is the floor, m: the height of Point-LIO's body
+    # frame -- the MID360's IMU, syncai_bringup's lidar_top_imu -- above the
+    # ground. clean_map judges the floor band and the dynamic rule from it, and
+    # a resume_mapping without a hint rebuilds the keyframe z from the
+    # localizer's last pose (its ground_z + this). It must equal the lidar
+    # height the Workspace's nav params carry for the G23 (controller, planner,
+    # localizer, task_runner; Workspace config/models/model_keys.yaml).
+    map_clean_lidar_height: 0.481

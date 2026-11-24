@@ -1,4 +1,12 @@
-# pgo_node parameters (syncai_mapping). README's parameter tables have the rationale.
+# pgo_node parameters (syncai_mapping) every robot model shares. README's
+# parameter tables have the rationale.
+#
+# What belongs to one kind of robot's body is in params/models/<robot_model>.yaml,
+# which the launch loads after this file (robot_model from the system INI, g23
+# when absent) and without which it refuses to start, as syncai_driver_manager's
+# launch does: map_clean_min_range and map_clean_lidar_height (2026-11-24). Every
+# model's file sets both: with neither here, a model that left one out would run
+# on the C++ default, which is the G23's.
 #
 # Loaded by mapping.launch.py; `/**/pgo_node:` keeps the file namespace-independent
 # (the node runs at /<robot_id>/pgo). Inputs, frames and the LIO reset service are
@@ -146,8 +154,7 @@
     map_clean_enabled: true
     map_clean_voxel_size: 0.1        # voxel edge, m
     map_clean_max_range: 20.0        # judging range, not the lidar's; farther points are kept, m
-    map_clean_min_range: 0.5         # the robot's own body, m
-    map_clean_lidar_height: 0.481    # keyframe z minus this is the floor, m
+    # map_clean_min_range and map_clean_lidar_height: params/models/<robot_model>.yaml
     map_clean_floor_band: 0.25       # +- m around the floor where neither rule applies
     # Above this the dynamic rule applies inside the floor band too (feet), m.
     map_clean_floor_band_dynamic: 0.1

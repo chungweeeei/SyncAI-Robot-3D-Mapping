@@ -1,0 +1,19 @@
+# The DEEP Robotics Lynx M20's body, over params/mapping_params.yaml: loaded after
+# it by mapping.launch.py when the system INI's [system] robot_model is m20.
+
+/**/pgo_node:
+  ros__parameters:
+    # The robot's own body round the lidar, m. FIRST GUESS, the G23's: the
+    # vendor's merged cloud seems to have the robot cropped already (lying, on
+    # robot01 2026-11-24, nothing came within 0.45 m of its origin).
+    map_clean_min_range: 0.5
+    # Keyframe z minus this is the floor, m: the height of Point-LIO's body
+    # frame above the ground. On the M20 that frame is the vendor's body IMU
+    # (the Workspace's syncai_pointlio params/models/m20.yaml: 0.0435 m above
+    # the vendor's base_link, whose origin is the merged cloud's). Measured on
+    # robot01, 2026-11-24, standing on a flat floor: the floor 1-3 m out sat
+    # 0.55-0.58 m below the cloud's origin, so 0.59-0.62 m below the IMU; 0.60
+    # is the middle. Standing height is the gait's, so a different stance
+    # height changes it. Also what a resume_mapping without a hint rebuilds the
+    # keyframe z with (the localizer's ground_z + this).
+    map_clean_lidar_height: 0.60

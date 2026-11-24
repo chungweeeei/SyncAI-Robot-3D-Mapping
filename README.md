@@ -402,9 +402,22 @@ own thread from a copy of the keyframes.
 
 ## Parameters
 
-From `params/mapping_params.yaml` (keyed `/**/pgo_node:`). Read once at startup and on every
-reset; `ros2 param set` afterwards has no effect. A missing or misspelt key falls back to the
-default silently.
+From `params/mapping_params.yaml` (keyed `/**/pgo_node:`), then the robot model's
+`params/models/<robot_model>.yaml` under the same key (2026-11-24, the layout
+`syncai_driver_manager` has). Read once at startup and on every reset; `ros2 param set`
+afterwards has no effect. A missing or misspelt key falls back to the default silently.
+
+**Per model.** The launch reads `[system] robot_model` from the system INI (`g23` when the key
+is absent) and loads `params/models/<robot_model>.yaml` after the shared file. The two keys
+that depend on the robot's body, `map_clean_min_range` and `map_clean_lidar_height`, are in
+the model files only, and the launch **refuses** a model with no file or one that leaves
+either unset: the C++ default is the G23's, and another robot mapping on it would clean its
+floor 10+ cm off and look healthy. `g23.yaml` holds the values the shared file had;
+`m20.yaml` (DEEP Robotics Lynx M20) the lidar height measured on robot01 (0.60 m: the floor
+0.55–0.58 m below the vendor's merged cloud, its IMU 0.0435 m above that) and the G23's body
+cut-off as a first guess. A new model's file needs a colcon build before a launch sees it.
+`map_clean_lidar_height` must equal the lidar height the Workspace's nav params carry for the
+same model.
 
 | Parameter | Default | Notes |
 |---|---|---|
@@ -451,8 +464,8 @@ default silently.
 | `map_cloud_pub_period` | `3.0` | s, minimum gap between map publishes |
 | `map_clean_enabled` | `true` | spawn `clean_map` after a save with patches |
 | `map_clean_voxel_size` | `0.1` | m |
-| `map_clean_max_range` / `map_clean_min_range` | `20.0` / `0.5` | m, judging range / robot-body cut-off. Points outside are not judged and stay in `map.pcd`. `max_range` is not the lidar's range; keep it below it |
-| `map_clean_lidar_height` | `0.481` | m, lidar above the floor |
+| `map_clean_max_range` / `map_clean_min_range` | `20.0` / `0.5` (model file) | m, judging range / robot-body cut-off. Points outside are not judged and stay in `map.pcd`. `max_range` is not the lidar's range; keep it below it |
+| `map_clean_lidar_height` | `0.481` G23, `0.60` M20 (model file) | m, Point-LIO's body frame (the IMU) above the floor; also rebuilds a hint-less resume's keyframe z from the localizer's `ground_z` |
 | `map_clean_floor_band` | `0.25` | m, band around the floor exempt from both rules |
 | `map_clean_floor_band_dynamic` | `0.1` | m, the dynamic rule's own exemption: above this the rule applies inside `floor_band` too. People's feet and ankles sit 0.1–0.25 m up and stayed in the map at every stop (dp1f_1012: the operator's, seen once from 3 m ahead, passed through 30–40 times); the floor itself lies within a voxel of the local floor |
 | `map_clean_floor_radius` | `10.0` | m, keyframes within this set a cell's floor |
