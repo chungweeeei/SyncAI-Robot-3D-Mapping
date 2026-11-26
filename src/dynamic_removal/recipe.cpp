@@ -42,6 +42,8 @@ Json paramsJson(const Params & p)
   j["sparse_min_hits"] = p.sparse_min_hits;
   j["dynamic_miss_ratio"] = p.dynamic_miss_ratio;
   j["dynamic_min_miss"] = p.dynamic_min_miss;
+  j["track_clear_radius"] = p.track_clear_radius;
+  j["track_clear_height"] = p.track_clear_height;
   j["clip_below_floor"] = p.clip_below_floor;
   j["octomap"] = p.octomap;
   j["floor_fill_radius"] = p.floor_fill_radius;
@@ -130,6 +132,7 @@ std::string ok(
   if (!m.sessions_warning.empty()) mj["sessions_warning"] = m.sessions_warning;
   mj["dynamic_voxels"] = m.dynamic_voxels;
   mj["session_kept_voxels"] = m.session_kept_voxels;
+  mj["track_cleared_voxels"] = m.track_cleared_voxels;
   mj["sparse_voxels"] = m.sparse_voxels;
   mj["map_points_removed"] = m.map_points_removed;
   mj["map_points_kept"] = m.map_points_kept;

@@ -8,7 +8,7 @@
 #
 # Parameters come from params/mapping_params.yaml (what every robot shares),
 # then params/models/<robot_model>.yaml (its body: map_clean_min_range,
-# map_clean_lidar_height; robot_model from the INI, g23 when absent, and no
+# map_clean_lidar_height, map_clean_track_clear_height; robot_model from the INI, g23 when absent, and no
 # model file is a refusal), then map_cloud_dir and resume_last_pose_file (both
 # robot_id-dependent) and start_on_launch on top.
 
@@ -40,7 +40,7 @@ DEFAULT_ROBOT_MODEL = "g23"
 # The keys a model's file must set: what differs with the robot's body. Not in
 # the shared params file, so a model that left one out would run on the C++
 # default -- the G23's -- and clean its maps around the wrong floor.
-MODEL_KEYS = ("map_clean_min_range", "map_clean_lidar_height")
+MODEL_KEYS = ("map_clean_min_range", "map_clean_lidar_height", "map_clean_track_clear_height")
 
 logger = launch_logging.get_logger("mapping.launch")
 

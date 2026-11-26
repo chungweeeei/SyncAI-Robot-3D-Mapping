@@ -54,6 +54,7 @@ void usage()
                "[--dynamic-max-height 2.0] "
                "[--floor-radius 10]\n"
                "         [--sparse-min-hits 2] [--dynamic-miss-ratio 2.0] [--dynamic-min-miss 3]\n"
+               "         [--track-clear-radius 0.2] [--track-clear-height 0.6]\n"
                "         [--clip-below-floor 1] [--octomap 0] [--floor-fill-radius 3]\n"
                "         [--nice 0] [--lock /dev/shm/syncai_pgo/clean_map.lock|none] "
                "[--started-at <ISO-8601 UTC>]\n";
@@ -160,6 +161,10 @@ int main(int argc, char ** argv)
     } else if (a == "--dynamic-min-miss") {
       good = parseDouble(v, d) && d == static_cast<int>(d);
       params.dynamic_min_miss = static_cast<int>(d);
+    } else if (a == "--track-clear-radius") {
+      good = parseDouble(v, params.track_clear_radius);
+    } else if (a == "--track-clear-height") {
+      good = parseDouble(v, params.track_clear_height);
     } else if (a == "--clip-below-floor") {
       good = (v == "0" || v == "1");
       params.clip_below_floor = (v == "1");

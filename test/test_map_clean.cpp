@@ -11,6 +11,11 @@
 // alike, a crate that arrived between two runs has a person's signature (hit
 // by the new run's few scans, seen through by every old one) and went from
 // map.pcd and from the planner's tree.
+//
+// And a blocker ON the robot's path, there only after the robot walked through
+// it, for many scans: the operator standing at a stair foot the robot had just
+// left (dp_1125). Seen standing about as often as seen through, it passes the
+// dynamic rule; the path rule (track_clear_radius) takes it.
 #include <gtest/gtest.h>
 #include <octomap/OcTree.h>
 #include <pcl/io/pcd_io.h>
@@ -48,11 +53,18 @@ constexpr double kCrateY0 = kOff + 4.0, kCrateY1 = kOff + 5.0;
 constexpr double kCrateZ1 = kOff + 1.0;
 // The part of the crate the dynamic rule judges: clear of the floor band.
 constexpr double kJudgedZ0 = kOff + 0.3, kJudgedZ1 = kOff + 0.9;
+// The blocker: 0.4 m square on the path, 1 m high. Judged within 0.15 m of the
+// path (the rule's radius is 0.2) and inside the rule's band, floor + 0.25 to
+// floor + track_clear_height (0.6).
+constexpr double kBlockX0 = kOff + 5.0, kBlockX1 = kOff + 5.4;
+constexpr double kBlockY0 = kPathY - 0.2, kBlockY1 = kPathY + 0.2;
+constexpr double kBlockJudgedZ0 = kOff + 0.3, kBlockJudgedZ1 = kOff + 0.55;
 
 struct Keyframe
 {
   double x;
   bool crate;
+  bool blocker = false;
 };
 
 bool onJudgedCrate(double x, double y, double z)
@@ -62,8 +74,31 @@ bool onJudgedCrate(double x, double y, double z)
          z > kJudgedZ0 && z < kJudgedZ1;
 }
 
+bool onJudgedBlocker(double x, double y, double z)
+{
+  constexpr double e = 0.01;
+  return x > kBlockX0 - e && x < kBlockX1 + e && std::fabs(y - kPathY) < 0.15 &&
+         z > kBlockJudgedZ0 && z < kBlockJudgedZ1;
+}
+
+// Where a ray from o along d enters the box [lo, hi], or "never".
+double boxEntry(const double o[3], const double d[3], const double lo[3], const double hi[3])
+{
+  double t_in = 0.0, t_out = std::numeric_limits<double>::max();
+  for (int a = 0; a < 3; ++a) {
+    if (std::fabs(d[a]) < 1e-9) {
+      if (o[a] < lo[a] || o[a] > hi[a]) return std::numeric_limits<double>::max();
+      continue;
+    }
+    const double t0 = (lo[a] - o[a]) / d[a], t1 = (hi[a] - o[a]) / d[a];
+    t_in = std::max(t_in, std::min(t0, t1));
+    t_out = std::min(t_out, std::max(t0, t1));
+  }
+  return t_in < t_out ? t_in : std::numeric_limits<double>::max();
+}
+
 // One scan from (x, kPathY, floor + lidar height), body frame = world axes:
-// 0.6 degree rays against the room and, with `crate`, the crate.
+// 0.6 degree rays against the room and, with `crate` / `blocker`, those.
 pcl::PointCloud<pcl::PointXYZI> scan(const Keyframe & kf)
 {
   const double ox = kf.x, oy = kPathY, oz = kOff + kLidarHeight;
@@ -97,6 +132,11 @@ pcl::PointCloud<pcl::PointXYZI> scan(const Keyframe & kf)
         }
         if (t_in < t_out && t_in < t) t = t_in;
       }
+      if (kf.blocker) {
+        const double blo[3] = {kBlockX0, kBlockY0, kOff};
+        const double bhi[3] = {kBlockX1, kBlockY1, kOff + 1.0};
+        t = std::min(t, boxEntry(o, d, blo, bhi));
+      }
       pcl::PointXYZI p;
       p.x = static_cast<float>(d[0] * t);
       p.y = static_cast<float>(d[1] * t);
@@ -109,12 +149,12 @@ pcl::PointCloud<pcl::PointXYZI> scan(const Keyframe & kf)
 }
 
 // `n` keyframes evenly along the path from x0 to x1; one stands halfway.
-std::vector<Keyframe> walk(size_t n, double x0, double x1, bool crate)
+std::vector<Keyframe> walk(size_t n, double x0, double x1, bool crate, bool blocker = false)
 {
   std::vector<Keyframe> ret;
   for (size_t i = 0; i < n; ++i) {
     const double along = n > 1 ? static_cast<double>(i) / static_cast<double>(n - 1) : 0.5;
-    ret.push_back({kOff + x0 + (x1 - x0) * along, crate});
+    ret.push_back({kOff + x0 + (x1 - x0) * along, crate, blocker});
   }
   return ret;
 }
@@ -140,9 +180,18 @@ struct Outcome
   size_t face_voxels = 0;         // sampled on the crate's near face
   size_t face_voxels_occupied = 0;
   size_t face_voxels_free = 0;
+  size_t blocker_points_saved = 0;
+  size_t blocker_points_kept = 0;
+  size_t blocker_voxels = 0;  // sampled on the blocker's face toward the robot
+  size_t blocker_voxels_occupied = 0;
+  size_t blocker_voxels_free = 0;
   double keptShare() const
   {
     return static_cast<double>(crate_points_kept) / static_cast<double>(crate_points_saved);
+  }
+  double blockerKeptShare() const
+  {
+    return static_cast<double>(blocker_points_kept) / static_cast<double>(blocker_points_saved);
   }
 };
 
@@ -167,6 +216,7 @@ protected:
     std::vector<size_t> starts;
     size_t i = 0;
     m_crate_points_saved = 0;
+    m_blocker_points_saved = 0;
     for (const auto & run : runs) {
       starts.push_back(i);
       for (const Keyframe & kf : run) {
@@ -174,6 +224,9 @@ protected:
         for (const auto & p : cloud) {
           if (onJudgedCrate(p.x + kf.x, p.y + kPathY, p.z + kOff + kLidarHeight)) {
             ++m_crate_points_saved;
+          }
+          if (onJudgedBlocker(p.x + kf.x, p.y + kPathY, p.z + kOff + kLidarHeight)) {
+            ++m_blocker_points_saved;
           }
         }
         const std::string name = std::to_string(i++) + ".pcd";
@@ -185,19 +238,22 @@ protected:
     writeSessions(m_dir, i, starts);
   }
 
-  Outcome clean()
+  Outcome clean(double track_clear_radius = dr::Params{}.track_clear_radius)
   {
     Outcome out;
     dr::Params params;
     params.octomap = true;
+    params.track_clear_radius = track_clear_radius;
     EXPECT_TRUE(dr::clean(m_dir, params, out.m));
     EXPECT_TRUE(out.m.octomap_written) << out.m.octomap_error;
     out.crate_points_saved = m_crate_points_saved;
+    out.blocker_points_saved = m_blocker_points_saved;
 
     pcl::PointCloud<pcl::PointXYZI> map;
     EXPECT_EQ(pcl::io::loadPCDFile((m_dir / dr::kMapFile).string(), map), 0);
     for (const auto & p : map) {
       if (onJudgedCrate(p.x, p.y, p.z)) ++out.crate_points_kept;
+      if (onJudgedBlocker(p.x, p.y, p.z)) ++out.blocker_points_kept;
     }
 
     octomap::OcTree tree((m_dir / dr::kOctomapFile).string());
@@ -208,12 +264,33 @@ protected:
         if (node) (tree.isNodeOccupied(node) ? out.face_voxels_occupied : out.face_voxels_free)++;
       }
     }
+    for (double y = kPathY - 0.1; y < kPathY + 0.15; y += 0.1) {
+      for (double z = kBlockJudgedZ0 + 0.05; z < kBlockJudgedZ1; z += 0.1) {
+        ++out.blocker_voxels;
+        const auto * node = tree.search(kBlockX0 + 0.02, y, z);
+        if (node) {
+          (tree.isNodeOccupied(node) ? out.blocker_voxels_occupied : out.blocker_voxels_free)++;
+        }
+      }
+    }
     return out;
   }
 
   fs::path m_dir;
   size_t m_crate_points_saved = 0;
+  size_t m_blocker_points_saved = 0;
 };
+
+// The robot walks the room's length, through where the blocker will stand;
+// then, back at the start, it waits while someone stands there: 12 scans hit
+// the blocker, the walk's 10 looked through it.
+std::vector<Keyframe> walkThenWaitBehindTheBlocker()
+{
+  std::vector<Keyframe> kfs = wholeRoom(10, false);
+  const std::vector<Keyframe> wait = walk(12, 1.5, 2.5, false, true);
+  kfs.insert(kfs.end(), wait.begin(), wait.end());
+  return kfs;
+}
 
 // The case this is for: the saved map never saw the crate, the resumed run
 // finds it there.
@@ -326,6 +403,49 @@ TEST_F(MapCleanTest, ASessionsFileThatDoesNotFitIsIgnored)
   EXPECT_EQ(o.m.sessions, 1u);
   EXPECT_NE(o.m.sessions_warning.find("ignored"), std::string::npos) << o.m.sessions_warning;
   EXPECT_LT(o.keptShare(), 0.1);
+}
+
+// The case the path rule is for: on the robot's path, standing longer than
+// the dynamic rule's ratio allows.
+TEST_F(MapCleanTest, SomeoneWhoStoodOnThePathIsRemoved)
+{
+  save({walkThenWaitBehindTheBlocker()});
+  const Outcome o = clean();
+  ASSERT_GT(o.blocker_points_saved, 100u);
+  EXPECT_GT(o.m.track_cleared_voxels, 0u);
+  EXPECT_LT(o.blockerKeptShare(), 0.1);
+  // Free, not unknown: the planner must be able to walk there again.
+  EXPECT_EQ(o.blocker_voxels_free, o.blocker_voxels);
+}
+
+// The same scans without the path rule: the dynamic rule alone keeps it, which
+// is what dp_1125's stair foot got.
+TEST_F(MapCleanTest, WithoutThePathRuleItStays)
+{
+  save({walkThenWaitBehindTheBlocker()});
+  const Outcome o = clean(0.0);
+  EXPECT_EQ(o.m.track_cleared_voxels, 0u);
+  EXPECT_GT(o.blockerKeptShare(), 0.9);
+  EXPECT_EQ(o.blocker_voxels_occupied, o.blocker_voxels);
+}
+
+// The robot's path proves nothing about a place it never reached: the walk
+// stops short of the blocker, which stays.
+TEST_F(MapCleanTest, WhatThePathNeverReachedStays)
+{
+  save({walk(10, 1.0, 4.0, false, true)});
+  const Outcome o = clean();
+  EXPECT_GT(o.blockerKeptShare(), 0.9);
+  EXPECT_EQ(o.blocker_voxels_occupied, o.blocker_voxels);
+}
+
+// Off the path (the crate stands 2 m from it, always there): untouched.
+TEST_F(MapCleanTest, ThePathRuleLeavesWhatIsBesideThePath)
+{
+  save({wholeRoom(12, true)});
+  const Outcome o = clean();
+  EXPECT_EQ(o.m.track_cleared_voxels, 0u);
+  EXPECT_GT(o.keptShare(), 0.9);
 }
 
 }  // namespace

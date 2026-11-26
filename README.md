@@ -143,6 +143,7 @@ many **passed through** it (M), and rewrites `map.pcd` without two classes of po
 |---|---|---|
 | dynamic | `M >= dynamic_min_miss` (3) and `M >= dynamic_miss_ratio × H` (2.0), between floor + `floor_band_dynamic` (0.1) and floor + `dynamic_max_height` | people, their feet included |
 | sparse | `H < sparse_min_hits` (2), outside the floor band | smear, edge returns, reflections |
+| on the path | `M >= dynamic_min_miss` (3), within `track_clear_radius` (0.2) of the level track, between floor + `floor_band` and floor + `track_clear_height` | someone who stood on the path for many scans, a door shut on another pass |
 
 - **Offline on purpose.** A person shows up only once a later scan sees through them, and the
   judgement needs the final loop-closed poses. Until the clean finishes, `map.pcd` is the raw save.
@@ -181,6 +182,21 @@ many **passed through** it (M), and rewrites `map.pcd` without two classes of po
   building. On dp1f_1008_2_v2 it adds 43 k voxels; of the columns with open space above, 89 % (1-2
   m from the path) and 71 % (2-3 m) then have floor, from 72 % and 40 %. A hole no ray looked into
   is not caught; hence the radius.
+- **The robot's own path** (`track_clear_radius`, `track_clear_height`, 2026-11-26). The ratio
+  cannot take someone who stood still for about as many scans as saw through them: on dp_1125
+  (M20, robot01) the operator stood at a stair foot the robot had just walked through, hit by
+  ~20 scans and seen through by 10–30, and the planner found the stair cut off from its floor;
+  a door shut on another pass is the same. But where the robot walked its body was, so within
+  the radius of the track, from the floor band up to the planner's body clearance, a voxel seen
+  through at least `dynamic_min_miss` times goes however often it was hit, and is free in the
+  tree. Only level stretches count (the track's height within 0.1 m over 8 keyframes either
+  side, segments under 1 m): on stairs and landings a keyframe's floor is not the tread under
+  the body. The radius stays under the body's half-width so that a wall stays with the passes
+  ~0.1 m apart, and the band starts above the floor band so that a kerb stays. A resumed map's
+  voxel that stands from a later run on is not cleared. What it cannot tell apart: something the
+  robot pushed aside or stepped over within the radius goes too. On dp_1125 it took the
+  operator and the door and a few single voxels, and no wall or tread.
+  `test/test_map_clean.cpp` holds a blocker that stood on the path after the robot passed.
 - **A resumed map is judged run by run where its runs disagree** (`sessions.json`). Counted over
   every keyframe alike, something that arrived between two runs has a person's signature: hit by
   the new run's few keyframes, seen through by every old one that looked at the empty spot. It
@@ -210,7 +226,8 @@ many **passed through** it (M), and rewrites `map.pcd` without two classes of po
 **Status** is `map_clean.recipe.json`: `converting` → `ok` / `failed`, with `started_at`,
 `finished_at`, the `params` used and, on `ok`, the `measurements`; `octomap_written` says whether
 `octomap.bt` came with it (`octomap_error` says why not), `sessions` how many mapping runs the
-clean told apart and `session_kept_voxels` how many voxels a later run kept. A hard kill leaves it at
+clean told apart, `session_kept_voxels` how many voxels a later run kept and
+`track_cleared_voxels` how many the path rule removed. A hard kill leaves it at
 `converting` with the raw map. **A 2D map made while it says `converting` came from the raw map**;
 redo it once it reads `ok`.
 
@@ -408,10 +425,10 @@ From `params/mapping_params.yaml` (keyed `/**/pgo_node:`), then the robot model'
 afterwards has no effect. A missing or misspelt key falls back to the default silently.
 
 **Per model.** The launch reads `[system] robot_model` from the system INI (`g23` when the key
-is absent) and loads `params/models/<robot_model>.yaml` after the shared file. The two keys
-that depend on the robot's body, `map_clean_min_range` and `map_clean_lidar_height`, are in
-the model files only, and the launch **refuses** a model with no file or one that leaves
-either unset: the C++ default is the G23's, and another robot mapping on it would clean its
+is absent) and loads `params/models/<robot_model>.yaml` after the shared file. The keys
+that depend on the robot's body, `map_clean_min_range`, `map_clean_lidar_height` and
+`map_clean_track_clear_height`, are in the model files only, and the launch **refuses** a model
+with no file or one that leaves any unset: the C++ default is the G23's, and another robot mapping on it would clean its
 floor 10+ cm off and look healthy. `g23.yaml` holds the values the shared file had;
 `m20.yaml` (DEEP Robotics Lynx M20) the lidar height measured on robot01 (0.60 m: the floor
 0.55–0.58 m below the vendor's merged cloud, its IMU 0.0435 m above that) and the G23's body
@@ -472,6 +489,8 @@ same model.
 | `map_clean_dynamic_max_height` | `2.0` | m, top of the people window |
 | `map_clean_dynamic_miss_ratio` / `map_clean_dynamic_min_miss` | `2.0` / `3` | dynamic rule; `min_miss` is an **int**, `<= 0` = off |
 | `map_clean_sparse_min_hits` | `2` | **int**, sparse rule; `<= 1` = off |
+| `map_clean_track_clear_radius` | `0.2` | m, the robot's-own-path rule ("Cleaning map.pcd"); under the body's half-width; `<= 0` = off |
+| `map_clean_track_clear_height` | `0.6` G23, `0.8` M20 (model file) | m above the floor the path rule clears up to: the Workspace planner's `body_clearance` for that model |
 | `map_clean_clip_below_floor` | `true` | stop rays at the floor |
 | `map_clean_octomap` | `false` | also write `octomap.bt` |
 | `map_clean_floor_fill_radius` | `3.0` | m, infer floor in `octomap.bt` this far from the path; `<= 0` = off |

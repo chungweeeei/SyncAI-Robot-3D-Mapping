@@ -4,8 +4,9 @@
 # What belongs to one kind of robot's body is in params/models/<robot_model>.yaml,
 # which the launch loads after this file (robot_model from the system INI, g23
 # when absent) and without which it refuses to start, as syncai_driver_manager's
-# launch does: map_clean_min_range and map_clean_lidar_height (2026-11-24). Every
-# model's file sets both: with neither here, a model that left one out would run
+# launch does: map_clean_min_range and map_clean_lidar_height (2026-11-24), and
+# map_clean_track_clear_height (2026-11-26). Every model's file sets all three:
+# with none here, a model that left one out would run
 # on the C++ default, which is the G23's.
 #
 # Loaded by mapping.launch.py; `/**/pgo_node:` keeps the file namespace-independent
@@ -163,6 +164,14 @@
     map_clean_sparse_min_hits: 2     # int; <= 1 turns the sparse rule off
     map_clean_dynamic_miss_ratio: 2.0
     map_clean_dynamic_min_miss: 3    # int; <= 0 turns the dynamic rule off
+    # The robot's own path: what stood within this of the level track, from the
+    # floor band up to map_clean_track_clear_height, and was seen through at
+    # least dynamic_min_miss times, is removed however often it was hit (a
+    # person who stood on the path after the robot passed, a door shut on
+    # another pass). Under the body's half-width. <= 0 = off. README, "Cleaning
+    # map.pcd".
+    map_clean_track_clear_radius: 0.2
+    # map_clean_track_clear_height: params/models/<robot_model>.yaml
     # Cut rays below the floor so reflections off a glossy floor count no misses.
     map_clean_clip_below_floor: true
     # Also write octomap.bt for octomap_planner's 3D paths. Most of the memory when on.

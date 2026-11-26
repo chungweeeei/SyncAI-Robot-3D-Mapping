@@ -17,3 +17,10 @@
     # height changes it. Also what a resume_mapping without a hint rebuilds the
     # keyframe z with (the localizer's ground_z + this).
     map_clean_lidar_height: 0.60
+
+    # How high above the floor clean_map clears what stood on the robot's own
+    # path (map_clean_track_clear_radius; README, "Cleaning map.pcd"), m: the
+    # Workspace planner's Octo3D body_clearance for the M20 (its params/models/m20.yaml),
+    # so that what the planner would call blocked where the robot walked goes.
+    # The robot passed there, so whatever stood that low was not there then.
+    map_clean_track_clear_height: 0.8

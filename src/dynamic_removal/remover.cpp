@@ -583,6 +583,60 @@ bool cleanImpl(
     return fz;
   };
 
+  // ---- The robot's own path ----
+  //
+  // The voxels its body swept (Params::track_clear_radius): per pair of
+  // consecutive keyframes of one run, the columns within the radius of the
+  // segment between them, from the interpolated floor + floor_band up to floor
+  // + track_clear_height. A segment longer than kMaxSegment is a jump (a
+  // relocalised or resumed start), not a walk; one on a stretch whose height
+  // varies by more than kLevelTol within kLevelWindow keyframes either side is
+  // on stairs or a landing, where the keyframe's floor (z - lidar_height) is
+  // not the tread under the body, and a tread would fall inside the band.
+  // On dp_1125 (2430 keyframes) the window left 524 segments out; inside, the
+  // band held the operator at a stair foot and a door shut on another pass,
+  // and a few single voxels, and no wall or tread.
+  octomap::KeySet swept;
+  if (params.track_clear_radius > 0.0 && params.track_clear_height > band) {
+    constexpr double kMaxSegment = 1.0;  // m; keyframes are ~0.5 m apart
+    constexpr double kLevelTol = 0.1;    // m
+    constexpr size_t kLevelWindow = 8;   // keyframes either side
+    const double r = params.track_clear_radius, res = params.voxel_size;
+    for (size_t i = 0; i + 1 < poses.size(); ++i) {
+      if (runOf(i) != runOf(i + 1)) continue;
+      const PoseLine & a = poses[i];
+      const PoseLine & b = poses[i + 1];
+      const double dx = b.tx - a.tx, dy = b.ty - a.ty, len2 = dx * dx + dy * dy;
+      if (len2 > kMaxSegment * kMaxSegment) continue;
+      double zlo = a.tz, zhi = a.tz;
+      const size_t w0 = i >= kLevelWindow ? i - kLevelWindow : 0;
+      const size_t w1 = std::min(poses.size() - 1, i + 1 + kLevelWindow);
+      for (size_t j = w0; j <= w1; ++j) {
+        zlo = std::min(zlo, poses[j].tz);
+        zhi = std::max(zhi, poses[j].tz);
+      }
+      if (zhi - zlo > kLevelTol) continue;
+      const double x0 = std::min(a.tx, b.tx) - r, x1 = std::max(a.tx, b.tx) + r;
+      const double y0 = std::min(a.ty, b.ty) - r, y1 = std::max(a.ty, b.ty) + r;
+      for (double x = (std::floor(x0 / res) + 0.5) * res; x <= x1; x += res) {
+        for (double y = (std::floor(y0 / res) + 0.5) * res; y <= y1; y += res) {
+          const double t =
+            len2 > 0.0 ? std::clamp(((x - a.tx) * dx + (y - a.ty) * dy) / len2, 0.0, 1.0) : 0.0;
+          const double ex = x - (a.tx + t * dx), ey = y - (a.ty + t * dy);
+          if (ex * ex + ey * ey > r * r) continue;
+          const double floor = a.tz + t * (b.tz - a.tz) - params.lidar_height;
+          const double zb = floor + band, zt = floor + params.track_clear_height;
+          for (double z = (std::floor(zb / res) + 0.5) * res; z <= zt; z += res) {
+            if (z < zb) continue;
+            octomap::OcTreeKey k;
+            if (tree.coordToKeyChecked(x, y, z, k)) swept.insert(k);
+          }
+        }
+      }
+    }
+  }
+  const uint32_t track_min_miss = static_cast<uint32_t>(std::max(1, params.dynamic_min_miss));
+
   // ---- Classify ----
   auto seenThrough = [&](uint32_t hits, uint32_t misses) {
     return params.dynamic_min_miss > 0 && hits > 0 && misses >= (uint32_t)params.dynamic_min_miss &&
@@ -623,6 +677,15 @@ bool cleanImpl(
     }
     const bool on_floor = !std::isnan(fz) && std::fabs(v.z() - fz) <= band;
     c.on_floor = on_floor;
+    // On the robot's own path, seen through at least once: removed, and free
+    // in the tree (misses > 0), however often it was hit.
+    if (
+      !dynamic && !c.session_kept && c.misses >= track_min_miss && swept.count(key) &&
+      !(runs.split() && standsSinceALaterRun(c))) {
+      c.removed = true;
+      ++out.track_cleared_voxels;
+      continue;
+    }
     const bool sparse = !dynamic && !on_floor && params.sparse_min_hits > 1 &&
                         c.hits + c.clipped < (uint32_t)params.sparse_min_hits;
     if (!dynamic && !sparse) continue;

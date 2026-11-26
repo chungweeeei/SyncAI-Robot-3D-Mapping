@@ -535,6 +535,10 @@ void PGONode::loadParameters()
   mc.dynamic_miss_ratio =
     this->declare_parameter("map_clean_dynamic_miss_ratio", mc.dynamic_miss_ratio);
   mc.dynamic_min_miss = this->declare_parameter("map_clean_dynamic_min_miss", mc.dynamic_min_miss);
+  mc.track_clear_radius =
+    this->declare_parameter("map_clean_track_clear_radius", mc.track_clear_radius);
+  mc.track_clear_height =
+    this->declare_parameter("map_clean_track_clear_height", mc.track_clear_height);
   mc.clip_below_floor = this->declare_parameter("map_clean_clip_below_floor", mc.clip_below_floor);
   mc.octomap = this->declare_parameter("map_clean_octomap", mc.octomap);
   mc.floor_fill_radius =
@@ -544,12 +548,12 @@ void PGONode::loadParameters()
     "[PGONode] map cleaning after save: %s | voxel %.3f m, range %.1f-%.1f m, lidar height "
     "%.3f m, floor band %.2f m (dynamic %.2f m), dynamic max height %.1f m, floor radius %.1f m, "
     "sparse min hits "
-    "%d, dynamic miss ratio %.2f, dynamic min miss %d, clip below floor %s, octomap %s, floor "
-    "fill radius %.1f m, nice %d",
+    "%d, dynamic miss ratio %.2f, dynamic min miss %d, track clear %.2f m up to %.2f m, clip below "
+    "floor %s, octomap %s, floor fill radius %.1f m, nice %d",
     m_node_config.map_clean_enabled ? "on" : "off", mc.voxel_size, mc.min_range, mc.max_range,
     mc.lidar_height, mc.floor_band, mc.floor_band_dynamic, mc.dynamic_max_height, mc.floor_radius,
-    mc.sparse_min_hits, mc.dynamic_miss_ratio, mc.dynamic_min_miss,
-    mc.clip_below_floor ? "on" : "off", mc.octomap ? "on" : "off", mc.floor_fill_radius,
+    mc.sparse_min_hits, mc.dynamic_miss_ratio, mc.dynamic_min_miss, mc.track_clear_radius,
+    mc.track_clear_height, mc.clip_below_floor ? "on" : "off", mc.octomap ? "on" : "off", mc.floor_fill_radius,
     m_node_config.map_clean_nice);
 
   // No robot_id prefix here: started bare, or the overrides came before the params file.
@@ -1694,6 +1698,10 @@ std::string PGONode::startMapClean(
     num(oc.dynamic_miss_ratio),
     "--dynamic-min-miss",
     std::to_string(oc.dynamic_min_miss),
+    "--track-clear-radius",
+    num(oc.track_clear_radius),
+    "--track-clear-height",
+    num(oc.track_clear_height),
     "--clip-below-floor",
     oc.clip_below_floor ? "1" : "0",
     "--octomap",

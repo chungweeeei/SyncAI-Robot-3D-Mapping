@@ -95,6 +95,28 @@ struct Params
   // (no sessions.json) is judged exactly as before.
   double dynamic_miss_ratio = 2.0;
   int dynamic_min_miss = 3;
+  // The mapping robot's own path. Where the robot walked, its body was: within
+  // track_clear_radius (m) of the track, between floor + floor_band and floor
+  // + track_clear_height (m), nothing stood for good. A voxel hit there that
+  // at least dynamic_min_miss scans (and at least one) also saw through is
+  // removed however often it was hit: someone who stood on the path after the
+  // robot had passed (the operator at a stair foot while the robot waited
+  // there: dp_1125, 2026-11-25, hit by ~20 scans and seen through by 10-30,
+  // under the ratio), a door shut on another pass. The dynamic rule cannot
+  // take those: they were seen standing about as often as seen through.
+  //
+  // The radius is under the body's half-width, so a wall beside the track
+  // stays with the passes some 0.1 m apart; the band starts above the floor
+  // band, so a kerb or a tread the track's height wobbles over stays; and
+  // only level stretches of track count (within 0.1 m over 8 keyframes either
+  // side), so stairs and their landings, where a keyframe's floor is not the
+  // floor under it, are left to the other rules. track_clear_height is the
+  // planner's body_clearance: what the robot passed under is cleared up to
+  // there, since the robot did pass. A resumed map's voxel that stands from a
+  // later run on (see above) is not cleared: a run's path says nothing about
+  // what arrived after it. track_clear_radius <= 0 turns this off.
+  double track_clear_radius = 0.2;
+  double track_clear_height = 0.6;
   // Rays that would pass more than (floor_band - voxel_size) below their own
   // keyframe's floor stop there, and their returns count as "clipped" rather
   // than hits: specular reflections off a glossy floor, whose rays would
@@ -129,6 +151,9 @@ struct Measurements
   // Voxels dynamic over all runs and kept because they stand from a later
   // run on (not counted in dynamic_voxels). 0 for one run.
   size_t session_kept_voxels = 0;
+  // Voxels removed for standing on the robot's own path (track_clear_radius),
+  // not counted in dynamic_voxels.
+  size_t track_cleared_voxels = 0;
   size_t sparse_voxels = 0;
   size_t map_points_removed = 0;
   size_t map_points_kept = 0;
